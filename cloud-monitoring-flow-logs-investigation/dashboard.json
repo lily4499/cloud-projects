@@ -1,0 +1,46 @@
+{
+  "widgets": [
+    {
+      "type": "metric",
+      "x": 0, "y": 0, "width": 12, "height": 6,
+      "properties": {
+        "title": "EC2 CPU Utilization",
+        "region": "us-east-1",
+        "metrics": [
+          [ "AWS/EC2", "CPUUtilization", "InstanceId", "i-0cc3aa4a39ac73303" ]
+        ],
+        "stat": "Average",
+        "period": 300
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12, "y": 0, "width": 12, "height": 6,
+      "properties": {
+        "title": "EC2 Status Checks",
+        "region": "us-east-1",
+        "metrics": [
+          [ "AWS/EC2", "StatusCheckFailed", "InstanceId", "i-0cc3aa4a39ac73303" ],
+          [ ".", "StatusCheckFailed_Instance", ".", "." ],
+          [ ".", "StatusCheckFailed_System", ".", "." ]
+        ],
+        "stat": "Maximum",
+        "period": 60
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 6, "width": 12, "height": 6,
+      "properties": {
+        "title": "Network In/Out",
+        "region": "us-east-1",
+        "metrics": [
+          [ "AWS/EC2", "NetworkIn", "InstanceId", "i-0cc3aa4a39ac73303" ],
+          [ ".", "NetworkOut", ".", "." ]
+        ],
+        "stat": "Sum",
+        "period": 300
+      }
+    }
+  ]
+}
