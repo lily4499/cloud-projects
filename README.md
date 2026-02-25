@@ -58,7 +58,7 @@
 ## 🏗️ Production Architecture Mindset
 
 ![Cloud Platform Architecture](diagrams/platform-architecture.png)
-![alt text](image.png)
+
 ---
 
 ## 🧪 Proof of Real Operations Work

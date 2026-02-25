@@ -1,4 +1,4 @@
-````markdown
+
 # IAM + Secrets Management (Least Privilege + Secure App Access)
 
 ## Purpose
