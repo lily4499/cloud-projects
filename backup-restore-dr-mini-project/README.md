@@ -1,556 +1,348 @@
+
+
 # Backup/Restore + DR Mini Project (AWS)
 
-## Purpose
+## Context
 
-In this mini project, I show how I protect an application from data loss and how I recover fast when something breaks.
+In this mini project, I show how I protect application data from loss and how I recover quickly when something goes wrong.
 
-I built a simple **backup / restore + disaster recovery (DR) workflow** on AWS using:
+I built a simple **backup / restore + disaster recovery (DR)** workflow on AWS using:
 
-* **EC2** (application server)
-* **EBS snapshots** (server disk backup)
-* **S3 with versioning** (app backups / files)
-* **RDS snapshots** *(optional if using DB)* or backup files to S3
-* **Cross-region copy** (basic DR idea)
-* **CloudWatch + AWS CLI** for verification
+* **EC2** for the application server
+* **EBS snapshots** for disk backup
+* **S3 with versioning** for backup files and rollback protection
+* **Cross-region copy** for a basic DR approach
+* **CloudWatch + AWS CLI** for validation and verification
 
-This project is small, but it demonstrates a real Ops mindset:
+This is a small project, but it shows a real operations mindset:
 
-* backup regularly
-* test restore (not just create backups)
-* keep a copy in another region
-* document the recovery steps (runbook style)
+* create backups
+* keep backup copies in another region
+* test restore, not just backup creation
+* verify that recovery really works
+* document a repeatable recovery process
 
 ---
 
 ## Problem
 
-In real production, backups are often enabled but **restore is never tested**.
+In many environments, backups are enabled, but restore is never tested.
 
-That is risky.
+That is a real risk.
 
-### Real Ops Scenario (simple)
+### Real Ops Scenario
 
-I have a small web app running on EC2.
-One day:
+I have a small application running on EC2. One day, one of these problems happens:
 
-* someone deletes important files, **or**
-* the EC2 instance gets corrupted, **or**
-* the database is damaged, **or**
-* I lose access to the original region during an incident
+* important files are deleted by mistake
+* the EC2 instance becomes corrupted
+* the attached disk has issues
+* I lose access to the primary region during an incident
 
-If I only say “backup is enabled” but cannot restore quickly, the business still loses time and data.
+If I only say “backup is enabled” but I cannot restore fast, the business still loses time, data, and service availability.
 
 ---
 
 ## Solution
 
-I created a mini backup/restore + DR project with these controls:
+I created a mini backup and DR workflow with these protections:
 
-1. **EBS snapshot backup** for the EC2 data volume
-2. **S3 versioning** for backup files and rollback protection
-3. **Cross-region copy** of snapshots / backup files for DR
-4. **Restore test** (create volume from snapshot and attach to recovery instance)
-5. **Documented CLI runbook** with variables (easy to repeat)
+1. **EBS snapshot backup** of the EC2 data volume
+2. **S3 versioning** to protect backup files from overwrite or deletion
+3. **Cross-region snapshot copy** for disaster recovery
+4. **Cross-region S3 copy** for backup file redundancy
+5. **Restore testing** by creating a new volume from snapshot and attaching it to a recovery EC2
+6. **Rollback testing** using S3 object version history
 
+This project proves that I do not only create backups — I also verify that recovery works.
 
 ---
 
-## Architecture Diagram
+## Architecture
 
 ![Architecture Diagram](screenshots/architecture.png)
 
 ---
 
-## Step-by-step 
-> I use **AWS CLI** and simple variables so I can repeat the same steps in another environment.
+## Workflow
+
+### 1. Verify AWS identity and project access
+
+**Goal:** Confirm I am connected to the correct AWS account before creating backup resources.
+
+![AWS identity verified](screenshots/01-aws-sts-identity.png)
+
+*Should show: successful AWS identity output with account ID and IAM identity.*
 
 ---
 
-### Step 1 — Set variables (Primary + DR regions)
+### 2. Create and protect the S3 backup locations
 
-**Purpose:** Keep commands reusable and avoid hardcoding values.
+**Goal:** Prepare a primary backup bucket and a DR bucket with versioning enabled so backup files are protected and recoverable.
 
-```bash
-# ===== General =====
-export PROJECT_NAME="backup-restore-dr-mini"
-export ENV="dev"
+![S3 primary bucket versioning enabled](screenshots/02-s3-primary-bucket-versioning.png)
 
-# ===== Regions =====
-export AWS_REGION_PRIMARY="us-east-1"
-export AWS_REGION_DR="us-west-2"
+*Should show: primary S3 bucket exists and versioning is enabled.*
 
-# ===== EC2 / EBS =====
-export INSTANCE_ID="i-xxxxxxxxxxxxxxxxx"              # existing app EC2
-export DATA_DEVICE_NAME="/dev/xvdf"                   # data volume device on EC2
-export AVAILABILITY_ZONE_PRIMARY="us-east-1a"
+![S3 DR bucket versioning enabled](screenshots/03-s3-dr-bucket-versioning.png)
 
-# ===== S3 =====
-export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-export S3_BACKUP_BUCKET="${PROJECT_NAME}-${ENV}-${ACCOUNT_ID}-primary"
-export S3_DR_BUCKET="${PROJECT_NAME}-${ENV}-${ACCOUNT_ID}-dr"
-
-# ===== Snapshot tags / names =====
-export SNAPSHOT_NAME="${PROJECT_NAME}-${ENV}-data-$(date +%Y%m%d-%H%M%S)"
-export DR_COPY_SNAPSHOT_NAME="${PROJECT_NAME}-${ENV}-dr-copy-$(date +%Y%m%d-%H%M%S)"
-
-# ===== Restore test =====
-export RESTORE_VOLUME_TYPE="gp3"
-export RECOVERY_INSTANCE_NAME="${PROJECT_NAME}-${ENV}-recovery-ec2"
-```
-
-**Verify identity**
-
-```bash
-aws sts get-caller-identity
-```
-
-![Step 1 — AWS identity verified](screenshots/01-aws-sts-identity.png)
-*Should show: successful `aws sts get-caller-identity` output with AWS account ID and IAM identity.*
+*Should show: DR S3 bucket exists in the DR region and versioning is enabled.*
 
 ---
 
-### Step 2 — Create S3 backup buckets (primary + DR(Disaster Recovery.))
+### 3. Upload a sample backup file
 
-**Purpose:** Store backup files (app exports, DB dumps, config backups) and enable versioning.
+**Goal:** Simulate a real application backup file and store it in S3 so I can test recovery later.
 
-#### 2.1 Create primary bucket
+![Backup file uploaded to S3](screenshots/04-s3-uploaded-backup-file.png)
 
-```bash
-aws s3api create-bucket \
-  --bucket "$S3_BACKUP_BUCKET" \
-  --region "$AWS_REGION_PRIMARY"
-```
-
-> If primary region is not `us-east-1`, use `--create-bucket-configuration LocationConstraint=<region>`.
-
-#### 2.2 Enable versioning on primary bucket
-
-```bash
-aws s3api put-bucket-versioning \
-  --bucket "$S3_BACKUP_BUCKET" \
-  --versioning-configuration Status=Enabled \
-  --region "$AWS_REGION_PRIMARY"
-```
-
-#### 2.3 Enable default encryption on primary bucket
-
-```bash
-aws s3api put-bucket-encryption \
-  --bucket "$S3_BACKUP_BUCKET" \
-  --server-side-encryption-configuration '{
-    "Rules": [{
-      "ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}
-    }]
-  }' \
-  --region "$AWS_REGION_PRIMARY"
-```
-
-#### 2.4 Create DR bucket
-
-```bash
-aws s3api create-bucket \
-  --bucket "$S3_DR_BUCKET" \
-  --region "$AWS_REGION_DR" \
-  --create-bucket-configuration LocationConstraint="$AWS_REGION_DR"
-```
-
-#### 2.5 Enable versioning on DR bucket
-
-```bash
-aws s3api put-bucket-versioning \
-  --bucket "$S3_DR_BUCKET" \
-  --versioning-configuration Status=Enabled \
-  --region "$AWS_REGION_DR"
-```
-
-![Step 2 — S3 primary bucket versioning enabled](screenshots/02-s3-primary-bucket-versioning.png)
-*Should show: primary S3 bucket exists and Versioning = Enabled.*
+*Should show: backup file exists in the primary S3 bucket.*
 
 ---
 
-![Step 2 — S3 DR bucket versioning enabled](screenshots/03-s3-dr-bucket-versioning.png)
-*Should show: DR S3 bucket in DR region with Versioning = Enabled.*
+### 4. Identify the EC2 data volume
+
+**Goal:** Find the correct EBS volume attached to the application server so I can back up the right disk.
+
+![EC2 data volume identified](screenshots/05-ebs-volume-id-from-instance.png)
+
+*Should show: EC2 block device mappings and the selected EBS volume ID.*
 
 ---
 
-### Step 3 — Create sample app backup file and upload to S3
+### 5. Create an EBS snapshot backup
 
-**Purpose:** Simulate a real app backup (config export / DB dump / tar file).
+**Goal:** Create a point-in-time backup of the application data volume.
 
-```bash
-mkdir -p backups
-echo "Backup created at $(date)" > backups/app-backup.txt
-echo "Environment: $ENV" >> backups/app-backup.txt
-echo "Project: $PROJECT_NAME" >> backups/app-backup.txt
+![EBS snapshot completed](screenshots/06-ebs-snapshot-completed.png)
 
-aws s3 cp backups/app-backup.txt "s3://$S3_BACKUP_BUCKET/app/app-backup.txt" \
-  --region "$AWS_REGION_PRIMARY"
-```
-
-#### 3.1 Simulate accidental overwrite (to test S3 versioning later)
-
-```bash
-echo "BAD CHANGE - overwritten file" > backups/app-backup.txt
-
-aws s3 cp backups/app-backup.txt "s3://$S3_BACKUP_BUCKET/app/app-backup.txt" \
-  --region "$AWS_REGION_PRIMARY"
-```
-
-![Step 3 — Backup file uploaded to S3](screenshots/04-s3-uploaded-backup-file.png)
-*Should show: `app/app-backup.txt` present in the primary S3 bucket.*
+*Should show: EBS snapshot exists in the primary region with state = completed.*
 
 ---
 
-### Step 4 — Find the EC2 data volume attached to the app server
+### 6. Copy the snapshot to the DR region
 
-**Purpose:** Identify the correct EBS volume to snapshot.
+**Goal:** Keep a copy of the disk backup in another AWS region in case the primary region has a major issue.
 
-```bash
-aws ec2 describe-instances \
-  --instance-ids "$INSTANCE_ID" \
-  --region "$AWS_REGION_PRIMARY" \
-  --query 'Reservations[].Instances[].BlockDeviceMappings[]'
-```
+![DR snapshot copy completed](screenshots/07-ebs-snapshot-copy-dr-completed.png)
 
-If you know the device name, get the volume ID:
-
-```bash
-export DATA_VOLUME_ID=$(aws ec2 describe-instances \
-  --instance-ids "$INSTANCE_ID" \
-  --region "$AWS_REGION_PRIMARY" \
-  --query "Reservations[0].Instances[0].BlockDeviceMappings[0].Ebs.VolumeId" \
-  --output text)
-
-echo "$DATA_VOLUME_ID"
-```
-
-![Step 4 — EC2 data volume identified](screenshots/05-ebs-volume-id-from-instance.png)
-*Should show: EC2 block device mappings and the selected data volume ID.*
+*Should show: copied snapshot exists in the DR region with state = completed.*
 
 ---
 
-### Step 5 — Create EBS snapshot (backup)
+### 7. Copy the backup file to the DR S3 bucket
 
-**Purpose:** Back up the EC2 data disk so I can restore later.
+**Goal:** Keep application backup files available in another region for basic disaster recovery.
 
-```bash
-export SNAPSHOT_ID=$(aws ec2 create-snapshot \
-  --volume-id "$DATA_VOLUME_ID" \
-  --description "$SNAPSHOT_NAME" \
-  --region "$AWS_REGION_PRIMARY" \
-  --tag-specifications "ResourceType=snapshot,Tags=[{Key=Name,Value=$SNAPSHOT_NAME},{Key=Project,Value=$PROJECT_NAME},{Key=Env,Value=$ENV}]" \
-  --query 'SnapshotId' \
-  --output text)
+![Backup file copied to DR S3 bucket](screenshots/08-s3-dr-file-copy.png)
 
-echo "$SNAPSHOT_ID"
-```
-
-Wait until snapshot completes:
-
-```bash
-aws ec2 wait snapshot-completed \
-  --snapshot-ids "$SNAPSHOT_ID" \
-  --region "$AWS_REGION_PRIMARY"
-
-echo "Snapshot completed: $SNAPSHOT_ID"
-```
-
-![Step 5 — EBS snapshot completed](screenshots/06-ebs-snapshot-completed.png)
-*Should show: snapshot in primary region with state = `completed`.*
+*Should show: backup file exists in the DR S3 bucket.*
 
 ---
 
-### Step 6 — Copy EBS snapshot to DR region (mini DR)
+### 8. Restore a new EBS volume from snapshot
 
-**Purpose:** Keep a backup copy in another region in case the primary region has a major issue.
+**Goal:** Prove the backup is usable by creating a new EBS volume from the snapshot.
 
-```bash
-export DR_SNAPSHOT_ID=$(aws ec2 copy-snapshot \
-  --source-region "$AWS_REGION_PRIMARY" \
-  --source-snapshot-id "$SNAPSHOT_ID" \
-  --description "$DR_COPY_SNAPSHOT_NAME" \
-  --region "$AWS_REGION_DR" \
-  --tag-specifications "ResourceType=snapshot,Tags=[{Key=Name,Value=$DR_COPY_SNAPSHOT_NAME},{Key=Project,Value=$PROJECT_NAME},{Key=Env,Value=$ENV}]" \
-  --query 'SnapshotId' \
-  --output text)
+![Restored EBS volume created](screenshots/09-restored-volume-created.png)
 
-echo "$DR_SNAPSHOT_ID"
-```
-
-Wait in DR region:
-
-```bash
-aws ec2 wait snapshot-completed \
-  --snapshot-ids "$DR_SNAPSHOT_ID" \
-  --region "$AWS_REGION_DR"
-
-echo "DR snapshot copy completed: $DR_SNAPSHOT_ID"
-```
-
-![Step 6 — DR snapshot copy completed](screenshots/07-ebs-snapshot-copy-dr-completed.png)
-*Should show: copied snapshot exists in DR region and state = `completed`.*
-![alt text](image.png)
----
-
-### Step 7 — Copy backup file to DR S3 bucket
-
-**Purpose:** Keep application backup files in DR region too.
-
-```bash
-aws s3 cp "s3://$S3_BACKUP_BUCKET/app/app-backup.txt" "s3://$S3_DR_BUCKET/app/app-backup.txt" \
-  --source-region "$AWS_REGION_PRIMARY" \
-  --region "$AWS_REGION_DR"
-```
-
-![Step 7 — Backup file copied to DR S3 bucket](screenshots/08-s3-dr-file-copy.png)
-*Should show: `app/app-backup.txt` exists in the DR S3 bucket.*
+*Should show: a new EBS volume created from snapshot with state = available.*
 
 ---
 
-### Step 8 — Restore test (EBS): create a volume from the snapshot
+### 9. Attach the restored volume to a recovery EC2 and verify data
 
-**Purpose:** Prove that backup is usable (real recovery test).
+**Goal:** Confirm that the restored disk can be attached and that the expected files are still present.
 
-```bash
-export RESTORED_VOLUME_ID=$(aws ec2 create-volume \
-  --snapshot-id "$SNAPSHOT_ID" \
-  --availability-zone "$AVAILABILITY_ZONE_PRIMARY" \
-  --volume-type "$RESTORE_VOLUME_TYPE" \
-  --region "$AWS_REGION_PRIMARY" \
-  --tag-specifications "ResourceType=volume,Tags=[{Key=Name,Value=${PROJECT_NAME}-${ENV}-restored-volume},{Key=Project,Value=$PROJECT_NAME},{Key=Env,Value=$ENV}]" \
-  --query 'VolumeId' \
-  --output text)
+![Restored volume attached to recovery EC2](screenshots/10-volume-attached-recovery-ec2.png)
 
-echo "$RESTORED_VOLUME_ID"
-```
-
-Wait until available:
-
-```bash
-aws ec2 wait volume-available \
-  --volume-ids "$RESTORED_VOLUME_ID" \
-  --region "$AWS_REGION_PRIMARY"
-
-echo "Restored volume is ready: $RESTORED_VOLUME_ID"
-```
-
-![Step 8 — Restored EBS volume created](screenshots/09-restored-volume-created.png)
-*Should show: new EBS volume created from snapshot with state = `available`.*
-
-
----
-
-### Step 9 — Attach restored volume to a recovery EC2 (test)
-
-**Purpose:** Mount the restored volume and verify files/data are present.
-
-> Use a separate recovery instance for testing.
-> If you already have one, set its instance ID below.
-
-```bash
-export RECOVERY_INSTANCE_ID="i-0e0cc89bc74601cb8"   # existing recovery/test EC2
-export RECOVERY_DEVICE_NAME="/dev/xvdg"
-
-aws ec2 attach-volume \
-  --volume-id "$RESTORED_VOLUME_ID" \
-  --instance-id "$RECOVERY_INSTANCE_ID" \
-  --device "$RECOVERY_DEVICE_NAME" \
-  --region "$AWS_REGION_PRIMARY"
-```
-
-**Then connect (SSM or SSH) and verify filesystem/data on the attached disk.**
-
-Example verification commands on the EC2 instance:
-
-```bash
-lsblk
-sudo mkdir -p /mnt/recovery
-# File system may already exist; adjust device path if needed
-sudo mount -o ro,nouuid /dev/nvme1n1p1 /mnt/recovery
-ls -lah /mnt/recovery
-```
-
-![Step 9 — Restored volume attached to recovery EC2](screenshots/10-volume-attached-recovery-ec2.png)
 *Should show: restored volume attached to the recovery/test EC2 instance.*
----
-![Step 9 — Mounted recovery volume and files visible](screenshots/11-mounted-recovery-volume-files.png)
-*Should show: `lsblk` output and files visible under `/mnt/recovery`.*
+
+![Mounted recovery volume and files visible](screenshots/11-mounted-recovery-volume-files.png)
+
+*Should show: mounted recovery volume and visible files/data.*
 
 ---
 
-### Step 10 — Restore test (S3 versioning rollback)
+### 10. Test S3 version rollback
 
-**Purpose:** Prove I can recover from accidental file overwrite.
+**Goal:** Recover a good version of a file after an accidental overwrite.
 
-List versions:
+![S3 object versions listed](screenshots/12-s3-object-versions.png)
 
-```bash
-aws s3api list-object-versions \
-  --bucket "$S3_BACKUP_BUCKET" \
-  --prefix "app/app-backup.txt" \
-  --region "$AWS_REGION_PRIMARY"
-```
+*Should show: multiple object versions for the same backup file.*
 
-Download the file to check current content:
+![S3 rollback restored good version](screenshots/13-s3-rollback-restored-good-version.png)
 
-```bash
-aws s3 cp "s3://$S3_BACKUP_BUCKET/app/app-backup.txt" ./restored-current.txt \
-  --region "$AWS_REGION_PRIMARY"
-
-cat restored-current.txt
-```
-
-Find the older version ID (good version), then restore it by copying that specific version:
-
-```bash
-export GOOD_VERSION_ID="yRhEjxvkQu6xvZZ5oIlg3ixiHBRy9s1s"
-
-aws s3api get-object \
-  --bucket "$S3_BACKUP_BUCKET" \
-  --key "app/app-backup.txt" \
-  --version-id "$GOOD_VERSION_ID" \
-  ./restored-good-version.txt \
-  --region "$AWS_REGION_PRIMARY"
-
-cat restored-good-version.txt
-```
-
-(Optional) Put the good version back as current:
-
-```bash
-aws s3 cp ./restored-good-version.txt "s3://$S3_BACKUP_BUCKET/app/app-backup.txt" \
-  --region "$AWS_REGION_PRIMARY"
-```
-
-![Step 10 — S3 object versions listed](screenshots/12-s3-object-versions.png)
-*Should show: multiple versions for `app/app-backup.txt` (good + overwritten version).*
-
-
----
-![Step 10 — S3 rollback restored good version](screenshots/13-s3-rollback-restored-good-version.png)
-*Should show: restored file content is the original good version.*
-
+*Should show: restored file content from the original good version.*
 
 ---
 
-## Outcome
+## Business Impact
 
-By the end of this project, I can clearly demonstrate:
+This project shows that I understand more than deployment. I also think about **data protection, recovery, and service resilience**.
 
-* how I back up EC2 data (EBS snapshots)
-* how I store backup files safely (S3 + versioning)
-* how I prepare for DR (cross-region copy)
-* how I test restores (volume restore + file rollback)
-* how I document recovery steps for a real incident
+From a business point of view, this helps with:
 
-This is the kind of project that shows I am not just deploying systems — I am also thinking about **recovery, resilience, and operations**.
+* **faster recovery time** when files or disks are damaged
+* **reduced risk of permanent data loss**
+* **better operational readiness** during incidents
+* **basic disaster recovery preparation** with another AWS region
+* **stronger confidence in backups** because restore is tested, not assumed
+
+This is important because backup without restore testing is not enough in real operations.
 
 ---
 
 ## Troubleshooting
 
-### 1) `create-bucket` fails in non-`us-east-1`
+### 1. S3 bucket creation fails outside `us-east-1`
 
-**Cause:** Missing `LocationConstraint`
-**Fix:** Add:
+**Cause:** Missing location constraint.
+
+**Fix:** Create the bucket with the correct region configuration.
+
+---
+
+### 2. Snapshot is created but restored volume cannot be attached
+
+**Cause:** The restored EBS volume and EC2 instance are not in the same Availability Zone.
+
+**Fix:** Make sure the restored volume is created in the same AZ as the recovery EC2.
+
+---
+
+### 3. Volume attachment fails
+
+**Cause:** Wrong instance ID, wrong device name, or AZ mismatch.
+
+**Fix:** Check:
+
+* recovery EC2 instance ID
+* volume ID
+* device name
+* EC2 AZ and EBS volume AZ
+
+---
+
+### 4. Volume attaches but mount fails
+
+**Cause:** Wrong device path, wrong partition, or filesystem issue.
+
+**Fix:** Check the attached disk name and identify the correct partition before mounting.
+
+---
+
+### 5. Previous S3 file version cannot be restored
+
+**Cause:** Wrong version ID was selected, or versioning was not enabled before overwrite.
+
+**Fix:** List object versions and use the correct older version ID.
+
+---
+
+### 6. Cross-region snapshot copy fails for encrypted snapshots
+
+**Cause:** KMS permissions are not configured correctly for cross-region copy.
+
+**Fix:** For a lab demo, use a simpler snapshot setup first. For production, configure the required KMS key policy and permissions.
+
+---
+
+## Useful CLI
+
+### General verification
 
 ```bash
---create-bucket-configuration LocationConstraint="$AWS_REGION_DR"
+aws sts get-caller-identity
+aws ec2 describe-instances --instance-ids <instance-id> --region <region>
+aws ec2 describe-volumes --region <region>
+aws ec2 describe-snapshots --owner-ids self --region <region>
+aws s3 ls
+aws s3 ls s3://<bucket-name> --recursive
 ```
 
----
+### Backup validation
 
-### 2) Snapshot creation works but restore volume fails in wrong AZ
+```bash
+aws ec2 describe-snapshots --snapshot-ids <snapshot-id> --region <region>
+aws ec2 describe-volumes --volume-ids <volume-id> --region <region>
+aws s3api list-object-versions --bucket <bucket-name> --prefix <key> --region <region>
+```
 
-**Cause:** EBS volume must be created in an AZ in the same region and then attached to an EC2 in the same AZ
-**Fix:** Use the correct AZ for the recovery EC2 and restored volume
+### Restore validation
 
----
+```bash
+aws ec2 describe-volumes --volume-ids <restored-volume-id> --region <region>
+aws ec2 describe-volumes-modifications --volume-ids <volume-id> --region <region>
+aws ec2 describe-instances --instance-ids <recovery-instance-id> --region <region>
+```
 
-### 3) `attach-volume` fails
+### Useful troubleshoot CLI
 
-**Cause:** Wrong instance ID, wrong device name, or instance/AZ mismatch
-**Fix:**
+```bash
+aws ec2 describe-instances \
+  --instance-ids <instance-id> \
+  --region <region> \
+  --query 'Reservations[].Instances[].Placement.AvailabilityZone'
 
-* verify recovery instance ID
-* verify instance AZ
-* verify restored volume AZ
-* choose a valid device name like `/dev/xvdg`
+aws ec2 describe-volumes \
+  --volume-ids <volume-id> \
+  --region <region> \
+  --query 'Volumes[].AvailabilityZone'
 
----
+aws ec2 describe-volumes \
+  --filters Name=attachment.instance-id,Values=<instance-id> \
+  --region <region>
 
-### 4) Volume attached but mount fails
+aws s3api get-bucket-versioning --bucket <bucket-name> --region <region>
 
-**Cause:** Wrong partition/device path, filesystem issue, or unformatted disk
-**Fix:**
+aws s3api list-object-versions \
+  --bucket <bucket-name> \
+  --prefix <key> \
+  --region <region>
+```
+
+### On the recovery EC2
 
 ```bash
 lsblk
 sudo file -s /dev/xvdg
-# Try partition device:
+sudo blkid
+sudo mkdir -p /mnt/recovery
 sudo mount /dev/xvdg1 /mnt/recovery
+ls -lah /mnt/recovery
 ```
-
----
-
-### 5) Cannot restore S3 previous version
-
-**Cause:** Using wrong version ID or versioning was not enabled before overwrite
-**Fix:**
-
-* confirm versioning is enabled
-* run `list-object-versions`
-* copy the correct version ID
-
----
-
-### 6) `copy-snapshot` permission/KMS issue (if encrypted snapshots)
-
-**Cause:** KMS key permissions not configured for cross-region copy
-**Fix:** Start with SSE-S3 / unencrypted lab snapshot for demo, then document KMS key policy requirements for production
 
 ---
 
 ## Cleanup
 
-> Run cleanup after testing to avoid extra cost.
+After testing, remove the recovery resources to avoid extra cost.
 
-### 1) Detach and delete restored test volume
+### Remove restored test volume
 
 ```bash
-aws ec2 detach-volume \
-  --volume-id "$RESTORED_VOLUME_ID" \
-  --region "$AWS_REGION_PRIMARY"
-
-aws ec2 wait volume-available \
-  --volume-ids "$RESTORED_VOLUME_ID" \
-  --region "$AWS_REGION_PRIMARY"
-
-aws ec2 delete-volume \
-  --volume-id "$RESTORED_VOLUME_ID" \
-  --region "$AWS_REGION_PRIMARY"
+aws ec2 detach-volume --volume-id <restored-volume-id> --region <primary-region>
+aws ec2 wait volume-available --volume-ids <restored-volume-id> --region <primary-region>
+aws ec2 delete-volume --volume-id <restored-volume-id> --region <primary-region>
 ```
 
-### 2) Delete snapshots (primary + DR)
+### Delete snapshots
 
 ```bash
-aws ec2 delete-snapshot \
-  --snapshot-id "$SNAPSHOT_ID" \
-  --region "$AWS_REGION_PRIMARY"
-
-aws ec2 delete-snapshot \
-  --snapshot-id "$DR_SNAPSHOT_ID" \
-  --region "$AWS_REGION_DR"
+aws ec2 delete-snapshot --snapshot-id <primary-snapshot-id> --region <primary-region>
+aws ec2 delete-snapshot --snapshot-id <dr-snapshot-id> --region <dr-region>
 ```
 
-### 3) Remove S3 objects and buckets
+### Remove S3 objects and buckets
 
 ```bash
-aws s3 rm "s3://$S3_BACKUP_BUCKET" --recursive --region "$AWS_REGION_PRIMARY"
-aws s3 rm "s3://$S3_DR_BUCKET" --recursive --region "$AWS_REGION_DR"
+aws s3 rm s3://<primary-backup-bucket> --recursive --region <primary-region>
+aws s3 rm s3://<dr-backup-bucket> --recursive --region <dr-region>
 
-aws s3api delete-bucket --bucket "$S3_BACKUP_BUCKET" --region "$AWS_REGION_PRIMARY"
-aws s3api delete-bucket --bucket "$S3_DR_BUCKET" --region "$AWS_REGION_DR"
+aws s3api delete-bucket --bucket <primary-backup-bucket> --region <primary-region>
+aws s3api delete-bucket --bucket <dr-backup-bucket> --region <dr-region>
 ```
 
 ---
