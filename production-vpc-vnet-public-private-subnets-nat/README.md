@@ -1,915 +1,407 @@
-# Professional AWS Network Setup (Reusable for All Projects)
 
-## Purpose
+# Professional AWS Network Setup
 
-In this project, I build a **professional AWS network foundation** that I can reuse for all my future projects (EC2, Jenkins, EKS, apps, databases, monitoring, etc.).
-This setup gives me a **clean, secure, and scalable VPC design** with public and private subnets across multiple Availability Zones.
+## Context
+
+For this project, I built a **professional AWS network foundation** that I can reuse for future projects like EC2 deployments, Jenkins, EKS, monitoring, databases, and internal applications.
+
+Instead of creating a different network every time, I wanted one **clean, secure, reusable baseline**. This gives me a strong starting point before deploying anything else in AWS.
+
+This project is based on a **production-style VPC design** with public and private subnet separation across multiple Availability Zones.
 
 ---
 
 ## Problem
 
-When I start projects without a proper network design, I usually run into problems like:
+When projects start without a proper network design, problems usually appear later:
 
-* resources exposed to the internet by mistake
-* no clear separation between app and database layers
-* hard-to-manage routing
-* weak security boundaries
-* poor reusability across projects
-* difficult troubleshooting later
+* resources may be exposed to the internet by mistake
+* application and database layers are not clearly separated
+* routing becomes hard to manage
+* security boundaries are weak
+* troubleshooting becomes messy
+* the setup is difficult to reuse for future projects
 
-In real DevOps work, the network should come **first** because every app, CI/CD pipeline, and Kubernetes cluster depends on it.
+In real DevOps work, the network should come first because applications, CI/CD systems, Kubernetes clusters, and databases all depend on it.
 
 ---
 
 ## Solution
 
-I create a **production-style AWS VPC network** with:
+To solve that, I created a **professional AWS VPC network setup** with:
 
 * **1 VPC**
-* **2 Public Subnets** (for ALB, NAT Gateway, bastion if needed)
-* **2 Private App Subnets** (for app servers, EKS worker nodes, Jenkins agents, etc.)
-* **2 Private Data Subnets** (for RDS, databases, internal services)
-* **Internet Gateway (IGW)**
-* **NAT Gateway** (for outbound internet from private subnets)
-* **Route Tables** (public/app/data)
-* **Network ACLs** (optional hardening baseline)
-* **Security Groups** (baseline examples)
-* **VPC Flow Logs** (for network visibility and troubleshooting)
-* **Tags** for clean organization and reuse
+* **2 public subnets**
+* **2 private application subnets**
+* **2 private data subnets**
+* **1 Internet Gateway**
+* **1 NAT Gateway**
+* **separate route tables for each tier**
+* **baseline security groups**
+* **VPC Flow Logs for visibility**
+* **tags for organization and reuse**
 
-This becomes my **standard AWS network template** for all projects.
+This setup gives me a reusable AWS network pattern where:
 
----
-
-## Real Example “Ops” Scenario
-
-I am building multiple projects (web app, Jenkins CI/CD, EKS cluster, database, monitoring stack).
-Instead of creating a different network every time, I build one **professional reusable network foundation** first.
-
-That way:
-
-* my **load balancer** can live in public subnets
-* my **application servers or EKS nodes** can run in private app subnets
-* my **database** can stay in private data subnets
-* I can control traffic flow cleanly
-* I can troubleshoot traffic with **VPC Flow Logs**
-* I can scale later without redesigning the network
-
+* public-facing resources can stay in public subnets
+* application resources can run in private app subnets
+* databases can stay isolated in private data subnets
+* private resources can still reach the internet safely through NAT when needed
+* traffic visibility is possible using Flow Logs
 
 ---
 
-## Architecture Diagram
+## Architecture
 
 ![Architecture Diagram](screenshots/architecture.png)
 
+This architecture shows a **multi-tier AWS network design**:
 
-> This diagram shows a **production AWS VPC architecture** where internet traffic enters through an **Internet Gateway**, reaches **public subnets** (hosting NAT Gateways), allows **private application subnets** to access the internet securely through NAT, keeps **private data subnets fully isolated with no internet access**, and sends network traffic logs to **CloudWatch Logs or S3 using VPC Flow Logs** for monitoring and security.
-
-
----
-
-## Step-by-step CLI + Variable Assignment
-
-> I use **AWS CLI** here so I can build the network from scratch.
-> Later, I can convert this into Terraform modules.
+* the **Internet Gateway** connects the VPC to the internet
+* **public subnets** are used for internet-facing resources like load balancers and NAT Gateway
+* **private app subnets** are for application servers, worker nodes, or internal compute
+* **private data subnets** are for databases and internal-only services
+* **VPC Flow Logs** provide network visibility for troubleshooting and monitoring
 
 ---
 
-### Step 1 — Set variables (region, naming, CIDRs)
+## Workflow with Goals + Screenshots
 
-**Purpose:** Define reusable values so all commands stay consistent.
+### 1. Define the network structure
 
-```bash
-# ===== AWS / Project =====
-export AWS_REGION="us-east-1"
-export PROJECT_NAME="professional-network"
-export ENV="prod"
+**Goal:** Start with a clear and reusable network plan before creating resources.
 
-# ===== CIDR Blocks =====
-export VPC_CIDR="10.10.0.0/16"
+I first defined the VPC CIDR range and separated the design into three subnet tiers:
 
-export PUBLIC_SUBNET_A_CIDR="10.10.1.0/24"
-export PUBLIC_SUBNET_B_CIDR="10.10.2.0/24"
+* public
+* private app
+* private data
 
-export PRIVATE_APP_SUBNET_A_CIDR="10.10.11.0/24"
-export PRIVATE_APP_SUBNET_B_CIDR="10.10.12.0/24"
+I also planned the setup across **two Availability Zones** to support better availability.
 
-export PRIVATE_DATA_SUBNET_A_CIDR="10.10.21.0/24"
-export PRIVATE_DATA_SUBNET_B_CIDR="10.10.22.0/24"
+**Screenshot:**
+![Variables exported](screenshots/01-variables-exported.png)
 
-# ===== Availability Zones (example in us-east-1) =====
-export AZ1="us-east-1a"
-export AZ2="us-east-1b"
-
-# ===== Tag helper values =====
-export OWNER="Liliane"
-export COST_CENTER="devops-lab"
-```
-
-**Screenshot (attach to step):**
-`screenshots/01-variables-exported.png`
-**Should show:** terminal with exported variables and region.
-![Step 1 - Variables exported](screenshots/01-variables-exported.png)
+**What it shows:** the initial project variables, region, and CIDR planning values used for the network build.
 
 ---
 
-### Step 2 — Confirm AWS account and region
+### 2. Confirm the AWS account and target region
 
-**Purpose:** Make sure I am creating resources in the correct account before spending money.
+**Goal:** Make sure resources are created in the correct AWS account and region before building anything.
 
-```bash
-aws sts get-caller-identity --region "$AWS_REGION"
-aws configure list
-```
+Before creating the network, I verified the AWS identity and region configuration. This helps avoid mistakes like building resources in the wrong environment.
 
-**Screenshot (attach to step):**
-`screenshots/02-sts-identity-and-config.png`
-**Should show:** AWS Account ID, ARN, and configured region.
-![Step 2 - STS identity and config](screenshots/02-sts-identity-and-config.png)  
+**Screenshot:**
+![STS identity and config](screenshots/02-sts-identity-and-config.png)
+
+**What it shows:** the AWS account identity, ARN, and configured region.
 
 ---
 
-### Step 3 — Create VPC
+### 3. Create the VPC
 
-**Purpose:** Create the main network container for all subnets and routing.
+**Goal:** Build the main network boundary for the project.
 
-```bash
-export VPC_ID=$(aws ec2 create-vpc \
-  --region "$AWS_REGION" \
-  --cidr-block "$VPC_CIDR" \
-  --tag-specifications "ResourceType=vpc,Tags=[{Key=Name,Value=${PROJECT_NAME}-${ENV}-vpc},{Key=Project,Value=${PROJECT_NAME}},{Key=Environment,Value=${ENV}},{Key=Owner,Value=${OWNER}},{Key=CostCenter,Value=${COST_CENTER}}]" \
-  --query 'Vpc.VpcId' \
-  --output text)
+I created the VPC as the main container for all the subnets, routing, and security layers. I also enabled DNS support and DNS hostnames so the network can support future services properly.
 
-echo "VPC_ID=$VPC_ID"
-```
+**Screenshot:**
+![VPC created](screenshots/03-vpc-created.png)
 
-Enable DNS features (important for EC2/EKS/internal naming):
-
-```bash
-aws ec2 modify-vpc-attribute \
-  --region "$AWS_REGION" \
-  --vpc-id "$VPC_ID" \
-  --enable-dns-support
-
-aws ec2 modify-vpc-attribute \
-  --region "$AWS_REGION" \
-  --vpc-id "$VPC_ID" \
-  --enable-dns-hostnames
-```
-
-Verify:
-
-```bash
-aws ec2 describe-vpcs \
-  --region "$AWS_REGION" \
-  --vpc-ids "$VPC_ID" \
-  --query 'Vpcs[0].{VpcId:VpcId,Cidr:CidrBlock,DnsSupport:DhcpOptionsId}'
-```
-
-**Screenshot (attach to step):**
-`screenshots/03-vpc-created.png`
-**Should show:** VPC ID and CIDR `10.10.0.0/16`.
-![Step 3 - VPC created](screenshots/03-vpc-created.png)
----
-
-### Step 4 — Create public subnets (AZ1, AZ2)
-
-**Purpose:** Public subnets host internet-facing resources like ALB and NAT Gateway.
-
-```bash
-export PUBLIC_SUBNET_A_ID=$(aws ec2 create-subnet \
-  --region "$AWS_REGION" \
-  --vpc-id "$VPC_ID" \
-  --cidr-block "$PUBLIC_SUBNET_A_CIDR" \
-  --availability-zone "$AZ1" \
-  --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=${PROJECT_NAME}-${ENV}-public-a},{Key=Tier,Value=public},{Key=Project,Value=${PROJECT_NAME}},{Key=Environment,Value=${ENV}}]" \
-  --query 'Subnet.SubnetId' \
-  --output text)
-
-export PUBLIC_SUBNET_B_ID=$(aws ec2 create-subnet \
-  --region "$AWS_REGION" \
-  --vpc-id "$VPC_ID" \
-  --cidr-block "$PUBLIC_SUBNET_B_CIDR" \
-  --availability-zone "$AZ2" \
-  --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=${PROJECT_NAME}-${ENV}-public-b},{Key=Tier,Value=public},{Key=Project,Value=${PROJECT_NAME}},{Key=Environment,Value=${ENV}}]" \
-  --query 'Subnet.SubnetId' \
-  --output text)
-
-echo "PUBLIC_SUBNET_A_ID=$PUBLIC_SUBNET_A_ID"
-echo "PUBLIC_SUBNET_B_ID=$PUBLIC_SUBNET_B_ID"
-```
-
-Enable auto-assign public IP (useful for public resources when needed):
-
-```bash
-aws ec2 modify-subnet-attribute \
-  --region "$AWS_REGION" \
-  --subnet-id "$PUBLIC_SUBNET_A_ID" \
-  --map-public-ip-on-launch
-
-aws ec2 modify-subnet-attribute \
-  --region "$AWS_REGION" \
-  --subnet-id "$PUBLIC_SUBNET_B_ID" \
-  --map-public-ip-on-launch
-```
-
-**Screenshot (attach to step):**
-`screenshots/04-public-subnets-created.png`
-**Should show:** both public subnets in AZ1/AZ2 with correct CIDRs.
-![Step 4 - Public subnets created](screenshots/04-public-subnets-created.png)
----
-
-### Step 5 — Create private app subnets (AZ1, AZ2)
-
-**Purpose:** Private app subnets are for app servers, EKS worker nodes, internal services.
-
-```bash
-
-export PRIVATE_APP_SUBNET_A_ID=$(aws ec2 create-subnet \
-  --region "$AWS_REGION" \
-  --vpc-id "$VPC_ID" \
-  --cidr-block "$PRIVATE_APP_SUBNET_A_CIDR" \
-  --availability-zone "$AZ1" \
-  --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=${PROJECT_NAME}-${ENV}-private-app-a},{Key=Tier,Value=private-app},{Key=Project,Value=${PROJECT_NAME}},{Key=Environment,Value=${ENV}}]" \
-  --query 'Subnet.SubnetId' \
-  --output text)
-
-export PRIVATE_APP_SUBNET_B_ID=$(aws ec2 create-subnet \
-  --region "$AWS_REGION" \
-  --vpc-id "$VPC_ID" \
-  --cidr-block "$PRIVATE_APP_SUBNET_B_CIDR" \
-  --availability-zone "$AZ2" \
-  --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=${PROJECT_NAME}-${ENV}-private-app-b},{Key=Tier,Value=private-app},{Key=Project,Value=${PROJECT_NAME}},{Key=Environment,Value=${ENV}}]" \
-  --query 'Subnet.SubnetId' \
-  --output text)
-
-echo "PRIVATE_APP_SUBNET_A_ID=$PRIVATE_APP_SUBNET_A_ID"
-echo "PRIVATE_APP_SUBNET_B_ID=$PRIVATE_APP_SUBNET_B_ID"
-```
-
-**Screenshot (attach to step):**
-`screenshots/05-private-app-subnets-created.png`
-**Should show:** private app subnets with correct CIDRs and AZs.
-![Step 5 - Private app subnets created](screenshots/05-private-app-subnets-created.png)
----
-
-### Step 6 — Create private data subnets (AZ1, AZ2)
-
-**Purpose:** Private data subnets are for databases (RDS), caches, and internal-only services.
-
-```bash
-
-export PRIVATE_DATA_SUBNET_A_ID=$(aws ec2 create-subnet \
-  --region "$AWS_REGION" \
-  --vpc-id "$VPC_ID" \
-  --cidr-block "$PRIVATE_DATA_SUBNET_A_CIDR" \
-  --availability-zone "$AZ1" \
-  --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=${PROJECT_NAME}-${ENV}-private-data-a},{Key=Tier,Value=private-data},{Key=Project,Value=${PROJECT_NAME}},{Key=Environment,Value=${ENV}}]" \
-  --query 'Subnet.SubnetId' \
-  --output text)
-
-export PRIVATE_DATA_SUBNET_B_ID=$(aws ec2 create-subnet \
-  --region "$AWS_REGION" \
-  --vpc-id "$VPC_ID" \
-  --cidr-block "$PRIVATE_DATA_SUBNET_B_CIDR" \
-  --availability-zone "$AZ2" \
-  --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=${PROJECT_NAME}-${ENV}-private-data-b},{Key=Tier,Value=private-data},{Key=Project,Value=${PROJECT_NAME}},{Key=Environment,Value=${ENV}}]" \
-  --query 'Subnet.SubnetId' \
-  --output text)
-
-echo "PRIVATE_DATA_SUBNET_A_ID=$PRIVATE_DATA_SUBNET_A_ID"
-echo "PRIVATE_DATA_SUBNET_B_ID=$PRIVATE_DATA_SUBNET_B_ID"
-```
-
-**Screenshot (attach to step):**
-`screenshots/06-private-data-subnets-created.png`
-**Should show:** private data subnets with correct CIDRs.
+**What it shows:** the VPC ID and the main CIDR block for the environment.
 
 ---
 
-### Step 7 — Create and attach Internet Gateway (IGW)
+### 4. Create the public subnets
 
-**Purpose:** Allow internet access for public subnets.
+**Goal:** Prepare internet-facing network zones for resources like load balancers and NAT Gateway.
 
-```bash
-export IGW_ID=$(aws ec2 create-internet-gateway \
-  --region "$AWS_REGION" \
-  --tag-specifications "ResourceType=internet-gateway,Tags=[{Key=Name,Value=${PROJECT_NAME}-${ENV}-igw},{Key=Project,Value=${PROJECT_NAME}},{Key=Environment,Value=${ENV}}]" \
-  --query 'InternetGateway.InternetGatewayId' \
-  --output text)
+I created two public subnets across two Availability Zones. These are the subnets that can support resources which need direct internet access.
 
-echo "IGW_ID=$IGW_ID"
+**Screenshot:**
+![Public subnets created](screenshots/04-public-subnets-created.png)
 
-aws ec2 attach-internet-gateway \
-  --region "$AWS_REGION" \
-  --internet-gateway-id "$IGW_ID" \
-  --vpc-id "$VPC_ID"
-```
-
-**Screenshot (attach to step):**
-`screenshots/07-igw-attached.png`
-**Should show:** Internet Gateway attached to the VPC.
-![Step 7 - IGW attached](screenshots/07-igw-attached.png) 
----
-
-### Step 8 — Create Elastic IP + NAT Gateway (AZ1)
-
-**Purpose:** Let private app subnets access the internet for updates/packages without exposing them publicly.
-
-> For cost saving in labs, I use **1 NAT Gateway** in AZ1.
-> In production, I can use **1 NAT Gateway per AZ** for higher availability.
-
-```bash
-export NAT_EIP_ALLOC_ID=$(aws ec2 allocate-address \
-  --region "$AWS_REGION" \
-  --domain vpc \
-  --query 'AllocationId' \
-  --output text)
-
-echo "NAT_EIP_ALLOC_ID=$NAT_EIP_ALLOC_ID"
-
-export NAT_GW_ID=$(aws ec2 create-nat-gateway \
-  --region "$AWS_REGION" \
-  --subnet-id "$PUBLIC_SUBNET_A_ID" \
-  --allocation-id "$NAT_EIP_ALLOC_ID" \
-  --tag-specifications "ResourceType=natgateway,Tags=[{Key=Name,Value=${PROJECT_NAME}-${ENV}-nat-a},{Key=Project,Value=${PROJECT_NAME}},{Key=Environment,Value=${ENV}}]" \
-  --query 'NatGateway.NatGatewayId' \
-  --output text)
-
-echo "NAT_GW_ID=$NAT_GW_ID"
-```
-
-Wait until NAT is available:
-
-```bash
-aws ec2 wait nat-gateway-available \
-  --region "$AWS_REGION" \
-  --nat-gateway-ids "$NAT_GW_ID"
-```
-
-**Screenshot (attach to step):**
-`screenshots/08-nat-gateway-available.png`
-**Should show:** NAT Gateway state = `available`.
- ![Step 8 - NAT Gateway available](screenshots/08-nat-gateway-available.png)
----
-
-### Step 9 — Create route tables (public, private-app, private-data)
-
-**Purpose:** Control where traffic goes for each subnet tier.
-
-#### 9.1 Create route tables
-
-```bash
-export PUBLIC_RT_ID=$(aws ec2 create-route-table \
-  --region "$AWS_REGION" \
-  --vpc-id "$VPC_ID" \
-  --tag-specifications "ResourceType=route-table,Tags=[{Key=Name,Value=${PROJECT_NAME}-${ENV}-public-rt},{Key=Project,Value=${PROJECT_NAME}},{Key=Environment,Value=${ENV}}]" \
-  --query 'RouteTable.RouteTableId' \
-  --output text)
-
-export PRIVATE_APP_RT_ID=$(aws ec2 create-route-table \
-  --region "$AWS_REGION" \
-  --vpc-id "$VPC_ID" \
-  --tag-specifications "ResourceType=route-table,Tags=[{Key=Name,Value=${PROJECT_NAME}-${ENV}-private-app-rt},{Key=Project,Value=${PROJECT_NAME}},{Key=Environment,Value=${ENV}}]" \
-  --query 'RouteTable.RouteTableId' \
-  --output text)
-
-export PRIVATE_DATA_RT_ID=$(aws ec2 create-route-table \
-  --region "$AWS_REGION" \
-  --vpc-id "$VPC_ID" \
-  --tag-specifications "ResourceType=route-table,Tags=[{Key=Name,Value=${PROJECT_NAME}-${ENV}-private-data-rt},{Key=Project,Value=${PROJECT_NAME}},{Key=Environment,Value=${ENV}}]" \
-  --query 'RouteTable.RouteTableId' \
-  --output text)
-
-echo "PUBLIC_RT_ID=$PUBLIC_RT_ID"
-echo "PRIVATE_APP_RT_ID=$PRIVATE_APP_RT_ID"
-echo "PRIVATE_DATA_RT_ID=$PRIVATE_DATA_RT_ID"
-```
-
-#### 9.2 Add routes
-
-Public route to IGW:
-
-```bash
-aws ec2 create-route \
-  --region "$AWS_REGION" \
-  --route-table-id "$PUBLIC_RT_ID" \
-  --destination-cidr-block "0.0.0.0/0" \
-  --gateway-id "$IGW_ID"
-```
-
-Private app route to NAT:
-
-```bash
-aws ec2 create-route \
-  --region "$AWS_REGION" \
-  --route-table-id "$PRIVATE_APP_RT_ID" \
-  --destination-cidr-block "0.0.0.0/0" \
-  --nat-gateway-id "$NAT_GW_ID"
-```
-
-> Private data route table intentionally has **no internet route** (best practice for DB tier).
-
-#### 9.3 Associate route tables with subnets
-
-```bash
-# Public subnets -> Public RT
-aws ec2 associate-route-table \
-  --region "$AWS_REGION" \
-  --subnet-id "$PUBLIC_SUBNET_A_ID" \
-  --route-table-id "$PUBLIC_RT_ID"
-
-aws ec2 associate-route-table \
-  --region "$AWS_REGION" \
-  --subnet-id "$PUBLIC_SUBNET_B_ID" \
-  --route-table-id "$PUBLIC_RT_ID"
-
-# Private App subnets -> Private App RT
-aws ec2 associate-route-table \
-  --region "$AWS_REGION" \
-  --subnet-id "$PRIVATE_APP_SUBNET_A_ID" \
-  --route-table-id "$PRIVATE_APP_RT_ID"
-
-aws ec2 associate-route-table \
-  --region "$AWS_REGION" \
-  --subnet-id "$PRIVATE_APP_SUBNET_B_ID" \
-  --route-table-id "$PRIVATE_APP_RT_ID"
-
-# Private Data subnets -> Private Data RT
-aws ec2 associate-route-table \
-  --region "$AWS_REGION" \
-  --subnet-id "$PRIVATE_DATA_SUBNET_A_ID" \
-  --route-table-id "$PRIVATE_DATA_RT_ID"
-
-aws ec2 associate-route-table \
-  --region "$AWS_REGION" \
-  --subnet-id "$PRIVATE_DATA_SUBNET_B_ID" \
-  --route-table-id "$PRIVATE_DATA_RT_ID"
-```
-
-**Screenshot (attach to step):**
-`screenshots/09-route-tables-and-routes.png`
-**Should show:** public RT route to IGW, private-app RT route to NAT, private-data RT without internet route.
-![Step 9 - Route tables and routes](screenshots/09-route-tables-and-routes.png)  
+**What it shows:** both public subnets created in different AZs with the correct CIDR ranges.
 
 ---
 
-### Step 10 — Create baseline security groups (example)
+### 5. Create the private application subnets
 
-**Purpose:** Create reusable SGs for future projects (ALB, App, DB pattern).
+**Goal:** Prepare secure subnets for application workloads.
 
-#### 10.1 ALB Security Group (public HTTP/HTTPS inbound)
+I created two private app subnets where future application servers, worker nodes, or internal services can run without being directly exposed to the internet.
 
-```bash
-export ALB_SG_ID=$(aws ec2 create-security-group \
-  --region "$AWS_REGION" \
-  --group-name "${PROJECT_NAME}-${ENV}-alb-sg" \
-  --description "ALB security group" \
-  --vpc-id "$VPC_ID" \
-  --tag-specifications "ResourceType=security-group,Tags=[{Key=Name,Value=${PROJECT_NAME}-${ENV}-alb-sg},{Key=Project,Value=${PROJECT_NAME}},{Key=Environment,Value=${ENV}}]" \
-  --query 'GroupId' \
-  --output text)
+**Screenshot:**
+![Private app subnets created](screenshots/05-private-app-subnets-created.png)
 
-aws ec2 authorize-security-group-ingress \
-  --region "$AWS_REGION" \
-  --group-id "$ALB_SG_ID" \
-  --ip-permissions '[
-    {"IpProtocol":"tcp","FromPort":80,"ToPort":80,"IpRanges":[{"CidrIp":"0.0.0.0/0","Description":"HTTP from internet"}]},
-    {"IpProtocol":"tcp","FromPort":443,"ToPort":443,"IpRanges":[{"CidrIp":"0.0.0.0/0","Description":"HTTPS from internet"}]}
-  ]'
-```
-
-#### 10.2 App Security Group (allow traffic from ALB SG only)
-
-```bash
-export APP_SG_ID=$(aws ec2 create-security-group \
-  --region "$AWS_REGION" \
-  --group-name "${PROJECT_NAME}-${ENV}-app-sg" \
-  --description "App security group" \
-  --vpc-id "$VPC_ID" \
-  --tag-specifications "ResourceType=security-group,Tags=[{Key=Name,Value=${PROJECT_NAME}-${ENV}-app-sg},{Key=Project,Value=${PROJECT_NAME}},{Key=Environment,Value=${ENV}}]" \
-  --query 'GroupId' \
-  --output text)
-
-aws ec2 authorize-security-group-ingress \
-  --region "$AWS_REGION" \
-  --group-id "$APP_SG_ID" \
-  --ip-permissions "[
-    {\"IpProtocol\":\"tcp\",\"FromPort\":80,\"ToPort\":80,\"UserIdGroupPairs\":[{\"GroupId\":\"$ALB_SG_ID\",\"Description\":\"HTTP from ALB\"}]}
-  ]"
-```
-
-#### 10.3 DB Security Group (allow DB traffic from App SG only — example MySQL 3306)
-
-```bash
-export DB_SG_ID=$(aws ec2 create-security-group \
-  --region "$AWS_REGION" \
-  --group-name "${PROJECT_NAME}-${ENV}-db-sg" \
-  --description "DB security group" \
-  --vpc-id "$VPC_ID" \
-  --tag-specifications "ResourceType=security-group,Tags=[{Key=Name,Value=${PROJECT_NAME}-${ENV}-db-sg},{Key=Project,Value=${PROJECT_NAME}},{Key=Environment,Value=${ENV}}]" \
-  --query 'GroupId' \
-  --output text)
-
-aws ec2 authorize-security-group-ingress \
-  --region "$AWS_REGION" \
-  --group-id "$DB_SG_ID" \
-  --ip-permissions "[
-    {\"IpProtocol\":\"tcp\",\"FromPort\":3306,\"ToPort\":3306,\"UserIdGroupPairs\":[{\"GroupId\":\"$APP_SG_ID\",\"Description\":\"MySQL from App SG\"}]}
-  ]"
-```
-
-**Screenshot (attach to step):**
-`screenshots/10-security-groups-baseline.png`
-**Should show:** ALB SG, App SG, DB SG with restricted inbound rules.
-![Step 10 - Security groups baseline](screenshots/10-security-groups-baseline.png) 
+**What it shows:** private application subnets with their CIDRs and Availability Zones.
 
 ---
 
-### Step 11 — Create VPC Flow Logs to CloudWatch Logs
+### 6. Create the private data subnets
 
-**Purpose:** Capture accepted/rejected traffic for troubleshooting and audits.
+**Goal:** Keep the database and data layer isolated.
 
-> This step needs an IAM role for Flow Logs to write to CloudWatch Logs.
+I created two private data subnets for resources that should remain more restricted, such as databases, caches, or internal backend services.
 
-#### 11.1 Create CloudWatch Log Group
+**Screenshot:**
+![Private data subnets created](screenshots/06-private-data-subnets-created.png)
 
-```bash
-export FLOW_LOG_GROUP="/aws/vpc/${PROJECT_NAME}-${ENV}-flowlogs"
-
-aws logs create-log-group \
-  --region "$AWS_REGION" \
-  --log-group-name "$FLOW_LOG_GROUP" 2>/dev/null || true
-
-# Optional (recommended): retention so logs don’t grow forever
-aws logs put-retention-policy \
-  --region "$AWS_REGION" \
-  --log-group-name "$FLOW_LOG_GROUP" \
-  --retention-in-days 30
-```
-
-#### 11.2 Create IAM role trust policy file
-
-Create file: `flowlogs-trust-policy.json`
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "",
-      "Effect": "Allow",
-      "Principal": {
-        "Service": "vpc-flow-logs.amazonaws.com"
-      },
-      "Action": "sts:AssumeRole"
-    }
-  ]
-}
-```
-
-Create role + attach permissions:
-
-```bash
-export FLOWLOGS_ROLE_NAME="${PROJECT_NAME}-${ENV}-flowlogs-role"
-
-# Create role 
-aws iam create-role \
-  --role-name "$FLOWLOGS_ROLE_NAME" \
-  --assume-role-policy-document file://flowlogs-trust-policy.json 2>/dev/null || true
-```
-Now create an inline policy (this replaces the incorrect managed policy ARN):
-
-Create file: flowlogs-to-cwlogs-policy.json
-
-#Attach it to the role:
-
-```bash
-aws iam put-role-policy \
-  --role-name "$FLOWLOGS_ROLE_NAME" \
-  --policy-name "VPCFlowLogsToCloudWatchLogs" \
-  --policy-document file://flowlogs-to-cwlogs-policy.json
-
-```
-
-Get role ARN:
-
-```bash
-export FLOWLOGS_ROLE_ARN=$(aws iam get-role \
-  --role-name "$FLOWLOGS_ROLE_NAME" \
-  --query 'Role.Arn' \
-  --output text)
-
-echo "FLOWLOGS_ROLE_ARN=$FLOWLOGS_ROLE_ARN"
-```
-
-#### 11.3 Create Flow Log for the VPC
-
-```bash
-export FLOW_LOG_ID=$(aws ec2 create-flow-logs \
-  --region "$AWS_REGION" \
-  --resource-type VPC \
-  --resource-ids "$VPC_ID" \
-  --traffic-type ALL \
-  --log-destination-type cloud-watch-logs \
-  --log-group-name "$FLOW_LOG_GROUP" \
-  --deliver-logs-permission-arn "$FLOWLOGS_ROLE_ARN" \
-  --tag-specifications "ResourceType=vpc-flow-log,Tags=[{Key=Name,Value=${PROJECT_NAME}-${ENV}-vpc-flowlog},{Key=Project,Value=${PROJECT_NAME}}]" \
-  --query 'FlowLogIds[0]' \
-  --output text)
-
-echo "FLOW_LOG_ID=$FLOW_LOG_ID"
-```
-
-**Screenshot (attach to step):**
-`screenshots/11-vpc-flow-logs-enabled.png`
-**Should show:** Flow log attached to the VPC and CloudWatch log group created.
-![Step 11 - VPC Flow Logs enabled](screenshots/11-vpc-flow-logs-enabled.png) 
-![alt text](image.png)
----
-
-### Step 12 — Verify the full network setup
-
-**Purpose:** Confirm all components exist before using the network in other projects.
-
-```bash
-aws ec2 describe-subnets \
-  --region "$AWS_REGION" \
-  --filters "Name=vpc-id,Values=$VPC_ID" \
-  --query 'Subnets[*].{SubnetId:SubnetId,AZ:AvailabilityZone,CIDR:CidrBlock,Name:Tags[?Key==`Name`]|[0].Value}' \
-  --output table
-
-aws ec2 describe-route-tables \
-  --region "$AWS_REGION" \
-  --filters "Name=vpc-id,Values=$VPC_ID" \
-  --query 'RouteTables[*].{RT:RouteTableId,Routes:Routes[*].DestinationCidrBlock}' \
-  --output table
-
-aws ec2 describe-security-groups \
-  --region "$AWS_REGION" \
-  --group-ids "$ALB_SG_ID" "$APP_SG_ID" "$DB_SG_ID" \
-  --query 'SecurityGroups[*].{Name:GroupName,Id:GroupId,VpcId:VpcId}' \
-  --output table
-```
-
-**Screenshot (attach to step):**
-`screenshots/12-network-verification-summary.png`
-**Should show:** all 6 subnets, route tables, and security groups.
-![Step 12 - Network verification summary](screenshots/12-network-verification-summary.png)  
----
+**What it shows:** private data subnets created with the correct CIDR layout.
 
 ---
 
-## Testing
+### 7. Attach the Internet Gateway
 
-### Test 1 — Public subnet can host internet-facing resources (route to IGW exists)
+**Goal:** Enable internet access for the public subnet tier.
 
-**Goal:** Confirm public route table sends `0.0.0.0/0` traffic to IGW.
+I attached an Internet Gateway to the VPC so that public subnets can route traffic to and from the internet.
 
-```bash
+**Screenshot:**
+![IGW attached](screenshots/07-igw-attached.png)
 
-aws ec2 describe-route-tables \
-  --region "$AWS_REGION" \
-  --route-table-ids "$PUBLIC_RT_ID" \
-  --query 'RouteTables[0].Routes'
-```
-
-**Expected result:** Route includes `0.0.0.0/0` -> `igw-...`
+**What it shows:** the Internet Gateway attached to the VPC.
 
 ---
 
-### Test 2 — Private app subnet has outbound internet path through NAT
+### 8. Create the NAT Gateway
 
-**Goal:** Confirm private app route table sends `0.0.0.0/0` traffic to NAT Gateway.
+**Goal:** Allow private application subnets to access the internet safely for outbound traffic.
 
-```bash
+I created a NAT Gateway in one of the public subnets. This allows private app resources to download updates or reach external services without becoming public themselves.
 
-aws ec2 describe-route-tables \
-  --region "$AWS_REGION" \
-  --route-table-ids "$PRIVATE_APP_RT_ID" \
-  --query 'RouteTables[0].Routes'
-```
+**Screenshot:**
+![NAT Gateway available](screenshots/08-nat-gateway-available.png)
 
-**Expected result:** Route includes `0.0.0.0/0` -> `nat-...`
+**What it shows:** the NAT Gateway in the `available` state.
 
 ---
 
-### Test 3 — Private data subnet has no direct internet route
+### 9. Configure route tables
 
-**Goal:** Confirm database tier is isolated from direct internet access.
+**Goal:** Control traffic flow correctly for each subnet tier.
 
-```bash
+I created separate route tables and associated them with the correct subnets:
 
-aws ec2 describe-route-tables \
-  --region "$AWS_REGION" \
-  --route-table-ids "$PRIVATE_DATA_RT_ID" \
-  --query 'RouteTables[0].Routes'
-```
+* public route table → internet via Internet Gateway
+* private app route table → outbound internet via NAT Gateway
+* private data route table → no direct internet path
 
-**Expected result:** No `0.0.0.0/0` internet route (unless intentionally added later for a special case).
+This is one of the most important parts of the design because it enforces separation between layers.
 
----
+**Screenshot:**
+![Route tables and routes](screenshots/09-route-tables-and-routes.png)
 
-### Test 4 — Security boundary test (SG relationship check)
-
-**Goal:** Confirm app accepts traffic from ALB SG only, DB accepts traffic from App SG only.
-
-```bash
-
-aws ec2 describe-security-groups \
-  --region "$AWS_REGION" \
-  --group-ids "$ALB_SG_ID" "$APP_SG_ID" "$DB_SG_ID" \
-  --query 'SecurityGroups[*].{Name:GroupName,Inbound:IpPermissions}'
-```
-
-**Expected result:**
-
-* ALB SG: inbound 80/443 from internet
-* App SG: inbound 80 from ALB SG only
-* DB SG: inbound 3306 from App SG only
+**What it shows:** the public route to the IGW, the private app route to the NAT Gateway, and the private data route table without direct internet access.
 
 ---
 
-### Test 5 — Flow Logs (if enabled)
+### 10. Create baseline security groups
 
-**Goal:** Confirm log events are being delivered to CloudWatch.
+**Goal:** Build a reusable security pattern for future projects.
 
-```bash
+I created baseline security groups using a layered model:
 
-aws logs describe-log-streams \
-  --region "$AWS_REGION" \
-  --log-group-name "$FLOW_LOG_GROUP"
-```
+* ALB security group for public web traffic
+* App security group allowing traffic only from the ALB group
+* DB security group allowing traffic only from the App group
 
-**Expected result:** One or more log streams created after traffic flows in the VPC.
+This creates a cleaner and more secure communication path between layers.
+
+**Screenshot:**
+![Security groups baseline](screenshots/10-security-groups-baseline.png)
+
+**What it shows:** the ALB, App, and DB security groups with restricted inbound access.
 
 ---
 
-## Outcome
+### 11. Enable VPC Flow Logs
 
-By the end of this project, I have a **professional AWS network setup** that I can reuse for:
+**Goal:** Add network visibility for troubleshooting and auditing.
 
-* EC2 projects
-* ALB + Auto Scaling projects
-* Jenkins / CI/CD infrastructure
-* EKS clusters
-* RDS / database deployments
-* monitoring and logging projects
-* security and compliance projects
+I enabled VPC Flow Logs and connected them to CloudWatch Logs so I can inspect accepted and rejected traffic later when troubleshooting connectivity or security issues.
 
-This makes all my future projects cleaner, faster to build.
+**Screenshot:**
+![VPC Flow Logs enabled](screenshots/11-vpc-flow-logs-enabled.png)
+
+**What it shows:** the flow log attached to the VPC and the CloudWatch log group in place.
+
+---
+
+### 12. Verify the full network setup
+
+**Goal:** Confirm the network foundation is complete and ready for reuse.
+
+At the end, I verified that all major components were present:
+
+* all subnets
+* route tables
+* security groups
+* flow logs
+* internet access path for the correct layers
+* isolation for the data layer
+
+**Screenshot:**
+![Network verification summary](screenshots/12-network-verification-summary.png)
+
+**What it shows:** the final verification view of subnets, route tables, and security groups.
+
+---
+
+## Business Impact
+
+This project gives me a **reusable AWS network foundation** that supports future deployments in a cleaner and more professional way.
+
+Business-wise, this matters because it helps with:
+
+* **better security** through public/private separation
+* **better scalability** by using a structure that can support more workloads later
+* **better reliability** with multi-AZ subnet placement
+* **faster project delivery** because the network baseline is already ready
+* **easier troubleshooting** with flow logs and structured routing
+* **better consistency** across all future AWS projects
+
+Instead of rebuilding the network design every time, I can now reuse the same strong baseline for app hosting, CI/CD, monitoring, Kubernetes, and databases.
 
 ---
 
 ## Troubleshooting
 
-### 1) NAT Gateway stays in `pending` for too long
+### NAT Gateway stays in pending
 
-* Check if the NAT is created in a **public subnet**
-* Confirm the public subnet has a route to the **IGW**
-* Confirm the Elastic IP allocation was successful
+Possible causes:
 
-### 2) Private instances cannot access internet
+* NAT Gateway was placed in the wrong subnet
+* the public subnet is not correctly configured
+* Elastic IP allocation failed
+* the Internet Gateway is missing or not attached properly
 
-* Check private app subnet route table (`0.0.0.0/0` -> NAT)
-* Confirm NAT Gateway is `available`
-* Confirm the instance is in the **private app subnet**, not private data subnet
+---
 
-### 3) Public subnet resources not reachable
+### Private app resources cannot reach the internet
 
-* Confirm public route table has `0.0.0.0/0` -> IGW
-* Check Security Group inbound rules (80/443/22 as needed)
-* Check NACLs are not blocking traffic
+Possible causes:
 
-### 4) Flow Logs not appearing
+* private app route table is not pointing to the NAT Gateway
+* NAT Gateway is not fully available
+* the instance or workload is in the wrong subnet
+* security rules are blocking outbound traffic
 
-* Confirm IAM role trust policy uses `vpc-flow-logs.amazonaws.com`
-* Confirm role has `VPCFlowLogsDeliveryRolePolicy`
-* Confirm CloudWatch log group exists in the same region
+---
 
-### 5) Wrong region / wrong account problem
+### Public resources are not reachable
 
-* Always run:
+Possible causes:
 
-  ```bash
-  aws sts get-caller-identity
-  aws configure list
-  ```
+* public subnet route table does not point to the Internet Gateway
+* security groups do not allow inbound traffic
+* the resource is actually deployed in a private subnet
+* NACL rules are blocking traffic
 
-  before creating resources
+---
+
+### Flow Logs are not showing data
+
+Possible causes:
+
+* Flow Logs were not attached correctly
+* IAM permissions for Flow Logs are incomplete
+* CloudWatch log group is missing
+* not enough traffic has passed through the VPC yet
+
+---
+
+### Wrong account or region issue
+
+Possible causes:
+
+* AWS CLI profile is pointing to another account
+* the region is different from the one expected
+* verification was skipped before resource creation
+
+---
+
+## Useful CLI
+
+### General verification
+
+```bash
+aws sts get-caller-identity
+aws configure list
+aws ec2 describe-vpcs
+aws ec2 describe-subnets
+aws ec2 describe-route-tables
+aws ec2 describe-security-groups
+aws ec2 describe-internet-gateways
+aws ec2 describe-nat-gateways
+aws ec2 describe-flow-logs
+aws logs describe-log-groups
+```
+
+### Routing checks
+
+```bash
+aws ec2 describe-route-tables --route-table-ids <route-table-id>
+aws ec2 describe-subnets --subnet-ids <subnet-id>
+aws ec2 describe-nat-gateways --nat-gateway-ids <nat-gateway-id>
+```
+
+### Security checks
+
+```bash
+aws ec2 describe-security-groups --group-ids <sg-id>
+aws ec2 describe-network-acls
+```
+
+### Flow Logs checks
+
+```bash
+aws ec2 describe-flow-logs
+aws logs describe-log-streams --log-group-name <log-group-name>
+aws logs tail <log-group-name> --follow
+```
+
+### Troubleshooting CLI
+
+```bash
+aws sts get-caller-identity
+aws configure list
+aws ec2 describe-route-tables
+aws ec2 describe-security-groups
+aws ec2 describe-nat-gateways
+aws ec2 describe-flow-logs
+aws logs describe-log-streams --log-group-name <log-group-name>
+```
+
+These commands are useful for checking whether the network is built correctly and for finding where connectivity problems are happening.
 
 ---
 
 ## Cleanup
 
-> Run cleanup when finish the lab to avoid charges (especially NAT Gateway and Elastic IP).
+After finishing the lab, I clean up the resources to avoid extra AWS charges, especially from:
 
-### Step 1 — Delete flow logs (if created)
+* NAT Gateway
+* Elastic IP
+* Flow Logs
+* CloudWatch log group
+* security groups
+* subnets
+* route tables
+* Internet Gateway
+* VPC
 
-```bash
-aws ec2 delete-flow-logs \
-  --region "$AWS_REGION" \
-  --flow-log-ids "$FLOW_LOG_ID" || true
-```
+Cleanup should be done in the right order so dependencies do not block deletion:
 
-### Step 2 — Delete security groups (DB -> App -> ALB order)
-
-```bash
-aws ec2 delete-security-group --region "$AWS_REGION" --group-id "$DB_SG_ID" || true
-aws ec2 delete-security-group --region "$AWS_REGION" --group-id "$APP_SG_ID" || true
-aws ec2 delete-security-group --region "$AWS_REGION" --group-id "$ALB_SG_ID" || true
-```
-
-### Step 3 — Delete NAT Gateway (wait until deleted)
-
-```bash
-aws ec2 delete-nat-gateway \
-  --region "$AWS_REGION" \
-  --nat-gateway-id "$NAT_GW_ID" || true
-```
-
-Check status until deleted:
-
-```bash
-aws ec2 describe-nat-gateways \
-  --region "$AWS_REGION" \
-  --nat-gateway-ids "$NAT_GW_ID" \
-  --query 'NatGateways[0].State'
-```
-
-### Step 4 — Release Elastic IP
-
-```bash
-aws ec2 release-address \
-  --region "$AWS_REGION" \
-  --allocation-id "$NAT_EIP_ALLOC_ID" || true
-```
-
-### Step 5 — Detach and delete IGW
-
-```bash
-aws ec2 detach-internet-gateway \
-  --region "$AWS_REGION" \
-  --internet-gateway-id "$IGW_ID" \
-  --vpc-id "$VPC_ID" || true
-
-aws ec2 delete-internet-gateway \
-  --region "$AWS_REGION" \
-  --internet-gateway-id "$IGW_ID" || true
-```
-
-### Step 6 — Delete subnets (data -> app -> public)
-
-```bash
-aws ec2 delete-subnet --region "$AWS_REGION" --subnet-id "$PRIVATE_DATA_SUBNET_A_ID" || true
-aws ec2 delete-subnet --region "$AWS_REGION" --subnet-id "$PRIVATE_DATA_SUBNET_B_ID" || true
-
-aws ec2 delete-subnet --region "$AWS_REGION" --subnet-id "$PRIVATE_APP_SUBNET_A_ID" || true
-aws ec2 delete-subnet --region "$AWS_REGION" --subnet-id "$PRIVATE_APP_SUBNET_B_ID" || true
-
-aws ec2 delete-subnet --region "$AWS_REGION" --subnet-id "$PUBLIC_SUBNET_A_ID" || true
-aws ec2 delete-subnet --region "$AWS_REGION" --subnet-id "$PUBLIC_SUBNET_B_ID" || true
-```
-
-### Step 7 — Delete route tables (custom ones only)
-
-```bash
-aws ec2 delete-route-table --region "$AWS_REGION" --route-table-id "$PUBLIC_RT_ID" || true
-aws ec2 delete-route-table --region "$AWS_REGION" --route-table-id "$PRIVATE_APP_RT_ID" || true
-aws ec2 delete-route-table --region "$AWS_REGION" --route-table-id "$PRIVATE_DATA_RT_ID" || true
-```
-
-### Step 8 — Delete VPC
-
-```bash
-aws ec2 delete-vpc \
-  --region "$AWS_REGION" \
-  --vpc-id "$VPC_ID" || true
-```
-
-### Step 9 — Optional cleanup for Flow Logs IAM + CloudWatch
-
-```bash
-aws iam detach-role-policy \
-  --role-name "$FLOWLOGS_ROLE_NAME" \
-  --policy-arn arn:aws:iam::aws:policy/service-role/VPCFlowLogsDeliveryRolePolicy || true
-
-aws iam delete-role \
-  --role-name "$FLOWLOGS_ROLE_NAME" || true
-
-aws logs delete-log-group \
-  --region "$AWS_REGION" \
-  --log-group-name "$FLOW_LOG_GROUP" || true
-```
+1. remove Flow Logs
+2. remove security groups
+3. delete NAT Gateway
+4. release Elastic IP
+5. detach and delete Internet Gateway
+6. delete subnets
+7. delete custom route tables
+8. delete the VPC
+9. remove optional log group and IAM role used for Flow Logs
 
 ---
-
-## Final Note 
-
-This project shows that I can build a **professional AWS network foundation from scratch**, using **multi-AZ subnet design, proper routing, private/public separation, NAT, security groups, and flow logs**—the same kind of reusable setup I would use before deploying any production app, CI/CD platform, or Kubernetes cluster.
-
----
-
 
