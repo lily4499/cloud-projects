@@ -1,5 +1,3 @@
-
-
 # Backup/Restore + DR Mini Project (AWS)
 
 ## Context
