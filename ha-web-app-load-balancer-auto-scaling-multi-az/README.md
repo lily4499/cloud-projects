@@ -1,133 +1,90 @@
 
 # HA Web App (Load Balancer + Auto Scaling + Multi-AZ)
 
-## Purpose
+## Context
 
-This project shows how I build a **high-availability (HA) web application on AWS** using:
+This project shows how I built a **high-availability web application on AWS** using:
 
 * **Application Load Balancer (ALB)**
 * **Auto Scaling Group (ASG)**
 * **EC2 Launch Template**
-* **Multi-AZ deployment** (2 Availability Zones)
+* **Multi-AZ deployment** across **2 Availability Zones**
 
-The goal is to prove I can design a setup that keeps the app available even when one instance fails.
+The goal of this project is to show that I can design a web tier that stays available even when an instance fails, becomes unhealthy, or traffic changes.
+
+In real operations, high availability is important because users should still be able to access the application even if part of the infrastructure has a problem.
 
 ---
 
 ## Problem
 
-In real operations, a single EC2 instance is a risk.
+A single EC2 instance is not enough for production-style availability.
 
-### Real “Ops” Scenario
+### Real Ops Scenario
 
-I deploy a web app on one EC2 instance. It works. But then:
+A team deploys a web app on one EC2 instance. At first, everything works. But later:
 
 * the instance crashes
 * the instance becomes unhealthy
-* an AZ has an issue
-* traffic increases suddenly
+* one Availability Zone has an issue
+* traffic increases and one server cannot handle it
 
-If I only have one server, users see downtime.
+If the application depends on one server only, users experience downtime.
 
-That is not good for production.
+That creates risk for the business, hurts reliability, and makes operations more stressful during incidents.
 
 ---
 
 ## Solution
 
-I build a **high-availability web tier** with:
+To solve this, I built an HA web layer using AWS services that work together:
 
-* **ALB** to distribute traffic
-* **ASG** to keep the right number of instances running
-* **2 subnets in 2 AZs** for resilience
-* **Health checks** so unhealthy instances are replaced automatically
+* **ALB** distributes incoming traffic across healthy instances
+* **ASG** keeps the desired number of instances running
+* **Multi-AZ subnets** improve resilience across Availability Zones
+* **Health checks** help detect unhealthy instances and replace them automatically
+
+This means the application can continue serving users even if one instance fails.
 
 ---
 
-## Architecture Diagram
+## Architecture
 
 ![Architecture Diagram](screenshots/architecture.png)
 
+### Architecture Summary
 
+* Users send requests to the **Application Load Balancer**
+* The **ALB listener** forwards traffic to a **target group**
+* The **target group** sends traffic only to **healthy EC2 instances**
+* The **Auto Scaling Group** maintains the required number of EC2 instances
+* Instances are distributed across **2 Availability Zones** for better resilience
 
-> **Note:** For demo simplicity, the EC2 instances can be placed in public subnets. For a more production-grade setup, I would place app instances in **private subnets** and keep only the ALB public.
-
----
-
-## Step-by-step
-
-## Step 1 — Prerequisites
-
-### Step 1.1 — Install and verify tools
-
-```bash
-aws --version
-```
-
-### Step 1.2 — Configure AWS credentials
-
-```bash
-aws configure
-```
-
-### Step 1.3 — Confirm identity (important)
-
-```bash
-aws sts get-caller-identity
-```
-
-**Purpose:** Make sure I am using the correct AWS account before creating resources.
-
+> **Note:** For demo simplicity, the EC2 instances can be placed in public subnets. In a more production-grade design, I would place the app instances in **private subnets** and keep only the ALB public.
 
 ---
 
-## Step 2 — Set variables (use this first)
+## Workflow
 
-> I always start with variables so the commands are easier to reuse and update.
+## 1. Confirm the AWS environment is ready
 
-### Step 2.1 — Global variables
+### Goal
 
-```bash
-# ===== Core project settings =====
-export AWS_REGION="us-east-1"
-export PROJECT="ha-webapp"
-export ENV="dev"
+Make sure I am working in the correct AWS account and region before creating anything.
 
-# ===== Networking =====
-export VPC_CIDR="10.20.0.0/16"
-export SUBNET1_CIDR="10.20.1.0/24"
-export SUBNET2_CIDR="10.20.2.0/24"
+This is important because creating HA infrastructure in the wrong account or region can cause confusion, cleanup issues, and unnecessary cost.
 
-# ===== Compute / scaling =====
-export INSTANCE_TYPE="t3.micro"
-export KEY_NAME=""   # optional (leave empty if using SSM only)
-export ASG_MIN="2"
-export ASG_DESIRED="2"
-export ASG_MAX="4"
+---
 
-# ===== Ports =====
-export APP_PORT="80"
-```
+## 2. Verify Multi-AZ design
 
-### Step 2.2 — Get available AZs (pick two)
+### Goal
 
-```bash
-aws ec2 describe-availability-zones \
-  --region "$AWS_REGION" \
-  --query 'AvailabilityZones[?State==`available`].ZoneName' \
-  --output table
-```
+Confirm that the region has multiple available Availability Zones so I can spread the application across them.
 
-Set two AZs:
+This is one of the key parts of high availability. If everything stays in only one AZ, the setup is not truly resilient.
 
-```bash
-export AZ1="us-east-1a"
-export AZ2="us-east-1b"
-```
-
-**Purpose:** Multi-AZ only works if I intentionally place subnets in different AZs.
-
-### Screenshot (Step 2)
+### Screenshot
 
 **Should show:** available AZs in the region.
 
@@ -135,177 +92,47 @@ export AZ2="us-east-1b"
 
 ---
 
-## Step 3 — Create networking (VPC + subnets + IGW + routes)
+## 3. Build networking across multiple Availability Zones
 
-### Step 3.1 — Create VPC
+### Goal
 
-```bash
-export VPC_ID=$(aws ec2 create-vpc \
-  --region "$AWS_REGION" \
-  --cidr-block "$VPC_CIDR" \
-  --tag-specifications "ResourceType=vpc,Tags=[{Key=Name,Value=${PROJECT}-${ENV}-vpc}]" \
-  --query 'Vpc.VpcId' \
-  --output text)
+Create the network foundation so the application can run across two different subnets in two different AZs.
 
-echo "VPC_ID=$VPC_ID"
-```
+In this part, I make sure:
 
-Enable DNS support/hostnames:
+* the app has a VPC
+* the subnets are placed in separate AZs
+* internet routing is in place for the demo design
 
-```bash
-aws ec2 modify-vpc-attribute --region "$AWS_REGION" --vpc-id "$VPC_ID" --enable-dns-support
-aws ec2 modify-vpc-attribute --region "$AWS_REGION" --vpc-id "$VPC_ID" --enable-dns-hostnames
-```
+This step matters because the ALB and ASG need the network to be distributed correctly for failover and traffic flow.
 
-**Purpose:** VPC is the network boundary for all resources.
-
-### Step 3.2 — Create two subnets in two AZs
-
-```bash
-export SUBNET1_ID=$(aws ec2 create-subnet \
-  --region "$AWS_REGION" \
-  --vpc-id "$VPC_ID" \
-  --cidr-block "$SUBNET1_CIDR" \
-  --availability-zone "$AZ1" \
-  --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=${PROJECT}-${ENV}-subnet-az1}]" \
-  --query 'Subnet.SubnetId' \
-  --output text)
-
-export SUBNET2_ID=$(aws ec2 create-subnet \
-  --region "$AWS_REGION" \
-  --vpc-id "$VPC_ID" \
-  --cidr-block "$SUBNET2_CIDR" \
-  --availability-zone "$AZ2" \
-  --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=${PROJECT}-${ENV}-subnet-az2}]" \
-  --query 'Subnet.SubnetId' \
-  --output text)
-
-echo "SUBNET1_ID=$SUBNET1_ID"
-echo "SUBNET2_ID=$SUBNET2_ID"
-```
-
-Enable auto-assign public IP (demo-friendly):
-
-```bash
-aws ec2 modify-subnet-attribute --region "$AWS_REGION" --subnet-id "$SUBNET1_ID" --map-public-ip-on-launch
-aws ec2 modify-subnet-attribute --region "$AWS_REGION" --subnet-id "$SUBNET2_ID" --map-public-ip-on-launch
-```
-
-**Purpose:** Two subnets in different AZs allow ASG to spread instances for HA.
-
-### Step 3.3 — Create and attach Internet Gateway
-
-```bash
-export IGW_ID=$(aws ec2 create-internet-gateway \
-  --region "$AWS_REGION" \
-  --tag-specifications "ResourceType=internet-gateway,Tags=[{Key=Name,Value=${PROJECT}-${ENV}-igw}]" \
-  --query 'InternetGateway.InternetGatewayId' \
-  --output text)
-
-aws ec2 attach-internet-gateway \
-  --region "$AWS_REGION" \
-  --internet-gateway-id "$IGW_ID" \
-  --vpc-id "$VPC_ID"
-
-echo "IGW_ID=$IGW_ID"
-```
-
-**Purpose:** Needed for internet access (ALB + demo instances).
-
-### Step 3.4 — Create route table and default route
-
-```bash
-export RTB_ID=$(aws ec2 create-route-table \
-  --region "$AWS_REGION" \
-  --vpc-id "$VPC_ID" \
-  --tag-specifications "ResourceType=route-table,Tags=[{Key=Name,Value=${PROJECT}-${ENV}-public-rt}]" \
-  --query 'RouteTable.RouteTableId' \
-  --output text)
-
-aws ec2 create-route \
-  --region "$AWS_REGION" \
-  --route-table-id "$RTB_ID" \
-  --destination-cidr-block "0.0.0.0/0" \
-  --gateway-id "$IGW_ID"
-
-aws ec2 associate-route-table --region "$AWS_REGION" --subnet-id "$SUBNET1_ID" --route-table-id "$RTB_ID"
-aws ec2 associate-route-table --region "$AWS_REGION" --subnet-id "$SUBNET2_ID" --route-table-id "$RTB_ID"
-
-echo "RTB_ID=$RTB_ID"
-```
-
-**Purpose:** Sends outbound internet traffic through the IGW.
-
-### Screenshots (Step 3)
+### Screenshots
 
 **Should show:** two subnets in different AZs.
+
 ![Subnets in Multi-AZ](screenshots/03-subnets-multi-az.png)
----
 
 **Should show:** route `0.0.0.0/0` to IGW.
+
 ![Route table to IGW](screenshots/04-route-table-igw.png)
 
 ---
 
-## Step 4 — Create security groups (ALB SG + EC2 SG)
+## 4. Secure traffic flow with security groups
 
-### Step 4.1 — ALB security group
+### Goal
 
-```bash
-export ALB_SG_ID=$(aws ec2 create-security-group \
-  --region "$AWS_REGION" \
-  --group-name "${PROJECT}-${ENV}-alb-sg" \
-  --description "ALB SG - allow HTTP from internet" \
-  --vpc-id "$VPC_ID" \
-  --query 'GroupId' \
-  --output text)
+Control how traffic enters the load balancer and how traffic reaches the application instances.
 
-aws ec2 authorize-security-group-ingress \
-  --region "$AWS_REGION" \
-  --group-id "$ALB_SG_ID" \
-  --ip-permissions '[
-    {
-      "IpProtocol":"tcp",
-      "FromPort":80,
-      "ToPort":80,
-      "IpRanges":[{"CidrIp":"0.0.0.0/0","Description":"Allow HTTP"}]
-    }
-  ]'
+Here, the design is:
 
-echo "ALB_SG_ID=$ALB_SG_ID"
-```
+* the **ALB** accepts HTTP traffic from users
+* the **EC2 instances** accept traffic only from the **ALB security group**
+* the app instances are not directly exposed to the internet
 
-**Purpose:** ALB must accept traffic from users on port 80.
+This improves security and keeps the traffic path clean.
 
-### Step 4.2 — EC2 app security group
-
-```bash
-export APP_SG_ID=$(aws ec2 create-security-group \
-  --region "$AWS_REGION" \
-  --group-name "${PROJECT}-${ENV}-app-sg" \
-  --description "App SG - allow HTTP only from ALB SG" \
-  --vpc-id "$VPC_ID" \
-  --query 'GroupId' \
-  --output text)
-
-aws ec2 authorize-security-group-ingress \
-  --region "$AWS_REGION" \
-  --group-id "$APP_SG_ID" \
-  --ip-permissions "[
-    {
-      \"IpProtocol\":\"tcp\",
-      \"FromPort\":80,
-      \"ToPort\":80,
-      \"UserIdGroupPairs\":[{\"GroupId\":\"$ALB_SG_ID\",\"Description\":\"ALB to app\"}]
-    }
-  ]"
-
-echo "APP_SG_ID=$APP_SG_ID"
-```
-
-**Purpose:** App instances should not be open to the internet directly.
-
-### Screenshot (Step 4)
+### Screenshot
 
 **Should show:** ALB SG and App SG rules.
 
@@ -313,57 +140,17 @@ echo "APP_SG_ID=$APP_SG_ID"
 
 ---
 
-## Step 5 — Create IAM role and instance profile (recommended for SSM)
+## 5. Prepare EC2 access and instance permissions
 
-> This lets me manage instances without SSH keys (cleaner and safer demo).
+### Goal
 
-### Step 5.1 — Create trust policy file
+Allow the instances to be managed in a safer way, especially for troubleshooting.
 
-Create file: `iam-ec2-trust-policy.json`
+I used an EC2 role and instance profile so the instances can work with AWS services properly, and so I can manage them more cleanly without depending only on SSH access.
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": { "Service": "ec2.amazonaws.com" },
-      "Action": "sts:AssumeRole"
-    }
-  ]
-}
-```
+This is useful during troubleshooting because I may need to inspect instance behavior if health checks fail.
 
-### Step 5.2 — Create role and attach SSM managed policy
-
-```bash
-export EC2_ROLE_NAME="${PROJECT}-${ENV}-ec2-role"
-export EC2_INSTANCE_PROFILE_NAME="${PROJECT}-${ENV}-ec2-profile"
-
-aws iam create-role \
-  --role-name "$EC2_ROLE_NAME" \
-  --assume-role-policy-document file://iam-ec2-trust-policy.json
-
-aws iam attach-role-policy \
-  --role-name "$EC2_ROLE_NAME" \
-  --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-```
-
-### Step 5.3 — Create instance profile and add role
-
-```bash
-aws iam create-instance-profile --instance-profile-name "$EC2_INSTANCE_PROFILE_NAME"
-
-aws iam add-role-to-instance-profile \
-  --instance-profile-name "$EC2_INSTANCE_PROFILE_NAME" \
-  --role-name "$EC2_ROLE_NAME"
-
-sleep 15
-```
-
-**Purpose:** SSM gives me secure access to troubleshoot instances without opening SSH port 22.
-
-### Screenshot (Step 5)
+### Screenshot
 
 **Should show:** EC2 role + instance profile + SSM policy.
 
@@ -371,116 +158,15 @@ sleep 15
 
 ---
 
-## Step 6 — Get a Linux AMI ID (Amazon Linux 2)
+## 6. Standardize instance deployment with a launch template
 
-```bash
-export AMI_ID=$(aws ssm get-parameter \
-  --region "$AWS_REGION" \
-  --name /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2 \
-  --query 'Parameter.Value' \
-  --output text)
+### Goal
 
-echo "AMI_ID=$AMI_ID"
-```
+Create one reusable EC2 configuration so every instance launched by Auto Scaling is consistent.
 
-**Purpose:** Use a current Amazon Linux AMI without hardcoding IDs.
+This is important because replacement instances should behave the same way as the original ones. A launch template helps keep the AMI, instance type, permissions, and startup behavior standardized.
 
----
-
-## Step 7 — Create user data script (web app install)
-
-Create file: `user-data.sh`
-
-```bash
-#!/bin/bash
-yum update -y
-yum install -y httpd
-
-TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" \
-  -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
-
-INSTANCE_ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s \
-  http://169.254.169.254/latest/meta-data/instance-id)
-
-AZ=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s \
-  http://169.254.169.254/latest/meta-data/placement/availability-zone)
-
-cat > /var/www/html/index.html <<EOF
-<html>
-  <head><title>HA Web App Demo</title></head>
-  <body style="font-family: Arial; margin: 40px;">
-    <h1>HA Web App is running ✅</h1>
-    <p><strong>Instance ID:</strong> $INSTANCE_ID</p>
-    <p><strong>Availability Zone:</strong> $AZ</p>
-    <p><strong>Project:</strong> HA Web App (ALB + ASG + Multi-AZ)</p>
-  </body>
-</html>
-EOF
-
-systemctl enable httpd
-systemctl start httpd
-```
-
-Make executable:
-
-```bash
-chmod +x user-data.sh
-```
-
-**Purpose:** Automatically installs a web server and displays instance info, which helps during testing and failover demos.
-
----
-
-## Step 8 — Create Launch Template
-
-### Step 8.1 — Base64 encode user data (Linux/macOS)
-
-```bash
-export USER_DATA_B64=$(base64 < user-data.sh | tr -d '\n')
-```
-
-### Step 8.2 — Create launch template
-
-```bash
-export LT_NAME="${PROJECT}-${ENV}-lt"
-
-aws ec2 create-launch-template \
-  --region "$AWS_REGION" \
-  --launch-template-name "$LT_NAME" \
-  --launch-template-data "{
-    \"ImageId\":\"$AMI_ID\",
-    \"InstanceType\":\"$INSTANCE_TYPE\",
-    \"SecurityGroupIds\":[\"$APP_SG_ID\"],
-    \"IamInstanceProfile\":{\"Name\":\"$EC2_INSTANCE_PROFILE_NAME\"},
-    \"UserData\":\"$USER_DATA_B64\",
-    \"TagSpecifications\":[
-      {
-        \"ResourceType\":\"instance\",
-        \"Tags\":[
-          {\"Key\":\"Name\",\"Value\":\"${PROJECT}-${ENV}-app\"},
-          {\"Key\":\"Project\",\"Value\":\"$PROJECT\"},
-          {\"Key\":\"Env\",\"Value\":\"$ENV\"}
-        ]
-      }
-    ]
-  }"
-```
-
-Get Launch Template ID:
-
-```bash
-export LT_ID=$(aws ec2 describe-launch-templates \
-  --region "$AWS_REGION" \
-  --launch-template-names "$LT_NAME" \
-  --query 'LaunchTemplates[0].LaunchTemplateId' \
-  --output text)
-
-echo "LT_ID=$LT_ID"
-```
-
-**Purpose:** Launch Template standardizes how ASG creates replacement instances.
-
-### Screenshot (Step 8)
+### Screenshot
 
 **Should show:** launch template created.
 
@@ -488,87 +174,17 @@ echo "LT_ID=$LT_ID"
 
 ---
 
-## Step 9 — Create Target Group (ALB backend)
+## 7. Create the load balancer entry point
 
-```bash
-export TG_NAME="${PROJECT}-${ENV}-tg"
+### Goal
 
-export TG_ARN=$(aws elbv2 create-target-group \
-  --region "$AWS_REGION" \
-  --name "$TG_NAME" \
-  --protocol HTTP \
-  --port 80 \
-  --vpc-id "$VPC_ID" \
-  --target-type instance \
-  --health-check-protocol HTTP \
-  --health-check-port traffic-port \
-  --health-check-path "/" \
-  --health-check-interval-seconds 30 \
-  --health-check-timeout-seconds 5 \
-  --healthy-threshold-count 2 \
-  --unhealthy-threshold-count 2 \
-  --matcher HttpCode=200 \
-  --query 'TargetGroups[0].TargetGroupArn' \
-  --output text)
+Set up the ALB so users have one stable endpoint instead of connecting to individual EC2 instances.
 
-echo "TG_ARN=$TG_ARN"
-```
+The ALB listens for incoming requests and forwards traffic to healthy targets only.
 
-**Purpose:** Target Group defines where ALB sends traffic and how health checks work.
+This is a major HA component because even if backend instances change, users continue using the same ALB endpoint.
 
----
-
-## Step 10 — Create Application Load Balancer + Listener
-
-### Step 10.1 — Create ALB
-
-```bash
-export ALB_NAME="${PROJECT}-${ENV}-alb"
-
-export ALB_ARN=$(aws elbv2 create-load-balancer \
-  --region "$AWS_REGION" \
-  --name "$ALB_NAME" \
-  --subnets "$SUBNET1_ID" "$SUBNET2_ID" \
-  --security-groups "$ALB_SG_ID" \
-  --scheme internet-facing \
-  --type application \
-  --ip-address-type ipv4 \
-  --query 'LoadBalancers[0].LoadBalancerArn' \
-  --output text)
-
-echo "ALB_ARN=$ALB_ARN"
-```
-
-Get ALB DNS:
-
-```bash
-export ALB_DNS=$(aws elbv2 describe-load-balancers \
-  --region "$AWS_REGION" \
-  --load-balancer-arns "$ALB_ARN" \
-  --query 'LoadBalancers[0].DNSName' \
-  --output text)
-
-echo "ALB_DNS=$ALB_DNS"
-```
-
-### Step 10.2 — Create listener (HTTP:80 -> target group)
-
-```bash
-export LISTENER_ARN=$(aws elbv2 create-listener \
-  --region "$AWS_REGION" \
-  --load-balancer-arn "$ALB_ARN" \
-  --protocol HTTP \
-  --port 80 \
-  --default-actions Type=forward,TargetGroupArn="$TG_ARN" \
-  --query 'Listeners[0].ListenerArn' \
-  --output text)
-
-echo "LISTENER_ARN=$LISTENER_ARN"
-```
-
-**Purpose:** ALB listener receives internet traffic and forwards it to healthy app instances.
-
-### Screenshot (Step 10)
+### Screenshot
 
 **Should show:** ALB active + HTTP listener.
 
@@ -576,30 +192,15 @@ echo "LISTENER_ARN=$LISTENER_ARN"
 
 ---
 
-## Step 11 — Create Auto Scaling Group (spread across 2 AZs)
+## 8. Create the Auto Scaling Group across 2 AZs
 
-```bash
-export ASG_NAME="${PROJECT}-${ENV}-asg"
+### Goal
 
-aws autoscaling create-auto-scaling-group \
-  --region "$AWS_REGION" \
-  --auto-scaling-group-name "$ASG_NAME" \
-  --launch-template "LaunchTemplateId=$LT_ID,Version=\$Latest" \
-  --min-size "$ASG_MIN" \
-  --max-size "$ASG_MAX" \
-  --desired-capacity "$ASG_DESIRED" \
-  --vpc-zone-identifier "${SUBNET1_ID},${SUBNET2_ID}" \
-  --target-group-arns "$TG_ARN" \
-  --health-check-type ELB \
-  --health-check-grace-period 120 \
-  --tags "ResourceId=$ASG_NAME,ResourceType=auto-scaling-group,Key=Name,Value=${PROJECT}-${ENV}-asg-instance,PropagateAtLaunch=true" \
-         "ResourceId=$ASG_NAME,ResourceType=auto-scaling-group,Key=Project,Value=$PROJECT,PropagateAtLaunch=true" \
-         "ResourceId=$ASG_NAME,ResourceType=auto-scaling-group,Key=Env,Value=$ENV,PropagateAtLaunch=true"
-```
+Make sure the environment always keeps the expected number of instances running across multiple Availability Zones.
 
-**Purpose:** ASG keeps the app running by maintaining desired instance count and replacing unhealthy instances.
+The ASG is what gives the environment self-healing behavior. If one instance dies, the group launches another one automatically.
 
-### Screenshot (Step 11)
+### Screenshot
 
 **Should show:** ASG desired/min/max and subnet list.
 
@@ -607,9 +208,196 @@ aws autoscaling create-auto-scaling-group \
 
 ---
 
-## Step 12 — Wait for instances and health checks
+## 9. Confirm the targets are healthy
 
-### Step 12.1 — Check ASG instances
+### Goal
+
+Verify that the EC2 instances are registered properly and passing health checks before sending real traffic.
+
+This is a critical validation step because the ALB should only forward traffic to healthy instances.
+
+### Screenshot
+
+**Should show:** two healthy targets.
+
+![Target group healthy](screenshots/10-target-group-healthy.png)
+
+---
+
+## 10. Validate the application through the load balancer
+
+### Goal
+
+Confirm that users can access the web app through the ALB endpoint.
+
+At this stage, the HA path is working:
+
+* request goes to ALB
+* ALB checks healthy targets
+* traffic is sent to available EC2 instances
+* the app responds successfully
+
+### Screenshot
+
+**Should show:** app page via ALB DNS.
+
+![ALB working](screenshots/11-alb-working.png)
+
+---
+
+## 11. Simulate failure and verify auto-healing
+
+### Goal
+
+Prove that the environment can recover automatically when one instance fails.
+
+This is the most important demo part of the project because it shows the real value of HA.
+
+I simulate failure by terminating one EC2 instance, then I verify that:
+
+* the ASG detects the loss
+* a replacement instance is launched
+* the target group becomes healthy again
+* the app remains available through the ALB
+
+### Screenshots
+
+**Should show:** one instance terminated manually.
+
+![Terminate instance](screenshots/12-terminate-instance.png)
+
+**Should show:** ASG launching replacement instance.
+
+![ASG replaced instance](screenshots/13-asg-replaced-instance.png)
+
+**Should show:** app still available after fail simulation.
+
+![App still working after failure](screenshots/14-app-still-working-after-failure.png)
+
+---
+
+## Business Impact
+
+This project matters because it demonstrates practical reliability design, not just basic EC2 deployment.
+
+### What this setup improves
+
+* **Higher availability**
+  The application does not depend on one EC2 instance only.
+
+* **Better resilience**
+  If an instance fails, the system replaces it automatically.
+
+* **Reduced downtime risk**
+  Traffic continues through the load balancer while the backend recovers.
+
+* **Operational confidence**
+  Health checks and Auto Scaling make failure response faster and more predictable.
+
+* **Production thinking**
+  This project shows how I design for uptime, recovery, and service continuity instead of just “getting the app running.”
+
+### Why this matters to a business
+
+For a company, downtime can mean:
+
+* lost users
+* lost transactions
+* poor customer experience
+* more pressure on operations teams
+
+With ALB + ASG + Multi-AZ, the service is more stable and easier to operate during incidents.
+
+---
+
+## Troubleshooting
+
+## 1. ALB shows 503 or targets stay unhealthy
+
+### Possible causes
+
+* web server did not start
+* application is not responding on port 80
+* user data did not complete correctly
+* EC2 security group does not allow traffic from the ALB security group
+
+### What I check
+
+* target health state
+* instance status
+* web server status on the EC2 instance
+* cloud-init logs
+* application response on localhost
+
+---
+
+## 2. Auto Scaling Group does not launch instances
+
+### Possible causes
+
+* launch template has a wrong AMI or config issue
+* IAM instance profile is not ready yet
+* subnet configuration is wrong
+* EC2 quota or capacity issue in the region
+
+### What I check
+
+* Auto Scaling activities
+* launch template settings
+* subnet placement
+* instance profile attachment
+* EC2 error messages in scaling activity history
+
+---
+
+## 3. ALB DNS opens but request times out
+
+### Possible causes
+
+* ALB security group does not allow inbound port 80
+* route table is missing internet route
+* ALB is not fully active yet
+* target group has no healthy instances
+
+### What I check
+
+* ALB status
+* listener configuration
+* route tables
+* security group rules
+* target group health
+
+---
+
+## 4. App works on instance but not through ALB
+
+### Possible causes
+
+* health check path is wrong
+* app is listening on a different port
+* security groups are not linked correctly
+* target group matcher does not match the app response
+
+### What I check
+
+* target group health check settings
+* app local response
+* ALB listener forwarding rule
+* instance security group inbound source
+
+---
+
+## Useful CLI
+
+These are the main CLI commands I would use for **validation and troubleshooting** in this project.
+
+### Confirm AWS identity
+
+```bash
+aws sts get-caller-identity
+```
+
+### Check Auto Scaling Group instances
 
 ```bash
 aws autoscaling describe-auto-scaling-groups \
@@ -619,7 +407,7 @@ aws autoscaling describe-auto-scaling-groups \
   --output table
 ```
 
-### Step 12.2 — Check target group health
+### Check target group health
 
 ```bash
 aws elbv2 describe-target-health \
@@ -629,210 +417,7 @@ aws elbv2 describe-target-health \
   --output table
 ```
 
-**Purpose:** Confirm the instances are launched and passing ALB health checks before testing from browser.
-
-### Screenshot (Step 12)
-
-**Should show:** two healthy targets.
-
-![Target group healthy](screenshots/10-target-group-healthy.png)
-
----
-
-## Step 13 — Test the app
-
-### Step 13.1 — Open the app in browser
-
-```bash
-echo "http://$ALB_DNS"
-```
-
-Or from CLI:
-
-```bash
-curl -s "http://$ALB_DNS"
-```
-
-**Expected result:** HTML page showing:
-
-* “HA Web App is running”
-* instance ID
-* AZ
-
-### Screenshot (Step 13)
-
-**Should show:** app page via ALB DNS.
-
-![ALB working](screenshots/11-alb-working.png)
-
----
-
-## Step 14 — Enable scaling policy 
-
-### Step 14.1 — Create scale-out policy
-
-```bash
-aws autoscaling put-scaling-policy \
-  --region "$AWS_REGION" \
-  --auto-scaling-group-name "$ASG_NAME" \
-  --policy-name "${PROJECT}-${ENV}-cpu-tt" \
-  --policy-type TargetTrackingScaling \
-  --target-tracking-configuration '{
-    "PredefinedMetricSpecification": {
-      "PredefinedMetricType": "ASGAverageCPUUtilization"
-    },
-    "TargetValue": 50.0
-  }'
-```
-
-**Purpose:** Automatically adds/removes instances based on CPU usage.
-
----
-
-## Testing
-
-## Step 15 — Failure simulation 
-
-This is the part I really like to demo because it proves the design works during a real issue.
-
-### Step 15.1 — Get running instance IDs
-
-```bash
-aws autoscaling describe-auto-scaling-groups \
-  --region "$AWS_REGION" \
-  --auto-scaling-group-names "$ASG_NAME" \
-  --query 'AutoScalingGroups[0].Instances[*].InstanceId' \
-  --output table
-```
-
-Pick one instance ID:
-
-```bash
-export BAD_INSTANCE_ID="<paste-one-instance-id>"
-```
-
-### Step 15.2 — Terminate one instance (simulate failure)
-
-```bash
-aws ec2 terminate-instances \
-  --region "$AWS_REGION" \
-  --instance-ids "$BAD_INSTANCE_ID"
-```
-
-**What I expect:**
-
-* ALB health check marks it unhealthy
-* ASG launches a replacement instance automatically
-* App remains available through ALB
-
-### Step 15.3 — Watch replacement happen
-
-```bash
-
-watch -n 10 "aws autoscaling describe-auto-scaling-groups \
-  --region $AWS_REGION \
-  --auto-scaling-group-names $ASG_NAME \
-  --query 'AutoScalingGroups[0].Instances[*].[InstanceId,AvailabilityZone,LifecycleState,HealthStatus]' \
-  --output table"
-```
-
-### Step 15.4 — Confirm target group health again
-
-```bash
-aws elbv2 describe-target-health \
-  --region "$AWS_REGION" \
-  --target-group-arn "$TG_ARN" \
-  --query 'TargetHealthDescriptions[*].[Target.Id,TargetHealth.State]' \
-  --output table
-```
-
-### Step 15.5 — Confirm app still responds
-
-```bash
-curl -s "http://$ALB_DNS" | head
-```
-
-**This demonstrates:** auto-healing + HA behavior.
-
-### Screenshots (Step 15)
-
-**Should show:** one instance terminated manually.
-![Terminate instance](screenshots/12-terminate-instance.png)
-
-**Should show:** ASG launching replacement instance.
-![ASG replaced instance](screenshots/13-asg-replaced-instance.png)
-
-**Should show:** app still available after fail simulation.
-![App still working after failure](screenshots/14-app-still-working-after-failure.png)
-
----
-
-## Outcome
-
-By the end of this project, I can confidently explain and demo:
-
-* how I build a **high-availability web tier** on AWS
-* how **ALB health checks** work
-* how **ASG replaces failed instances automatically**
-* how **Multi-AZ** improves resilience
-* how I troubleshoot using CLI and health checks
-
----
-
-## Troubleshooting
-
-### Common issue 1 — ALB shows 503 / targets unhealthy
-
-**Possible causes**
-
-* `httpd` not installed or not started
-* user-data script failed
-* app listens on wrong port
-* app SG not allowing port 80 from ALB SG
-
-**Checks**
-
-```bash
-aws elbv2 describe-target-health --region "$AWS_REGION" --target-group-arn "$TG_ARN"
-```
-
-If using SSM, connect to instance:
-
-```bash
-aws ec2 describe-instances \
-  --region "$AWS_REGION" \
-  --filters "Name=tag:Project,Values=$PROJECT" "Name=instance-state-name,Values=running" \
-  --query 'Reservations[*].Instances[*].InstanceId' \
-  --output text
-```
-
-Start session (replace instance id):
-
-```bash
-aws ssm start-session --region "$AWS_REGION" --target <instance-id>
-```
-
-Then on the instance:
-
-```bash
-sudo systemctl status httpd
-sudo journalctl -u httpd --no-pager | tail -50
-sudo cat /var/log/cloud-init-output.log | tail -100
-curl -I http://localhost
-```
-
----
-
-### Common issue 2 — ASG launches no instances
-
-**Possible causes**
-
-* bad launch template AMI
-* IAM instance profile not ready yet
-* subnet/route issues
-* EC2 quota limits
-
-**Checks**
+### Check scaling activity history
 
 ```bash
 aws autoscaling describe-scaling-activities \
@@ -841,139 +426,90 @@ aws autoscaling describe-scaling-activities \
   --max-items 10
 ```
 
----
-
-### Common issue 3 — ALB DNS opens but times out
-
-**Possible causes**
-
-* ALB security group missing inbound 80
-* route table missing `0.0.0.0/0 -> IGW`
-* ALB not active yet
-
-**Checks**
+### Check ALB status
 
 ```bash
-aws elbv2 describe-load-balancers --region "$AWS_REGION" --load-balancer-arns "$ALB_ARN"
-aws ec2 describe-route-tables --region "$AWS_REGION" --route-table-ids "$RTB_ID"
-aws ec2 describe-security-groups --region "$AWS_REGION" --group-ids "$ALB_SG_ID"
-```
-
----
----
-
-## Cleanup
-
-> I always include cleanup so I don’t leave resources running and generating cost.
-
-## Step 16 — Delete resources in safe order
-
-### Step 16.1 — Delete ASG
-
-```bash
-aws autoscaling update-auto-scaling-group \
+aws elbv2 describe-load-balancers \
   --region "$AWS_REGION" \
-  --auto-scaling-group-name "$ASG_NAME" \
-  --min-size 0 \
-  --desired-capacity 0
-
-sleep 30
-
-aws autoscaling delete-auto-scaling-group \
-  --region "$AWS_REGION" \
-  --auto-scaling-group-name "$ASG_NAME" \
-  --force-delete
+  --load-balancer-arns "$ALB_ARN"
 ```
 
-### Step 16.2 — Delete ALB listener, ALB, target group
-
-```bash
-aws elbv2 delete-listener --region "$AWS_REGION" --listener-arn "$LISTENER_ARN"
-
-aws elbv2 delete-load-balancer --region "$AWS_REGION" --load-balancer-arn "$ALB_ARN"
-
-sleep 60
-
-aws elbv2 delete-target-group --region "$AWS_REGION" --target-group-arn "$TG_ARN"
-```
-
-### Step 16.3 — Delete launch template
-
-```bash
-aws ec2 delete-launch-template --region "$AWS_REGION" --launch-template-id "$LT_ID"
-```
-
-### Step 16.4 — Delete security groups
-
-```bash
-aws ec2 delete-security-group --region "$AWS_REGION" --group-id "$APP_SG_ID"
-aws ec2 delete-security-group --region "$AWS_REGION" --group-id "$ALB_SG_ID"
-```
-
-### Step 16.5 — Delete IAM instance profile and role
-
-```bash
-aws iam remove-role-from-instance-profile \
-  --instance-profile-name "$EC2_INSTANCE_PROFILE_NAME" \
-  --role-name "$EC2_ROLE_NAME"
-
-aws iam delete-instance-profile --instance-profile-name "$EC2_INSTANCE_PROFILE_NAME"
-
-aws iam detach-role-policy \
-  --role-name "$EC2_ROLE_NAME" \
-  --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-
-aws iam delete-role --role-name "$EC2_ROLE_NAME"
-```
-
-### Step 16.6 — Delete route table, IGW, subnets, VPC
+### Check route table
 
 ```bash
 aws ec2 describe-route-tables \
   --region "$AWS_REGION" \
-  --route-table-ids "$RTB_ID" \
-  --query 'RouteTables[0].Associations[*].RouteTableAssociationId' \
-  --output text
+  --route-table-ids "$RTB_ID"
 ```
 
-Disassociate non-main route table associations (if returned):
+### Check security groups
 
 ```bash
-# replace with actual assoc IDs if needed
-# aws ec2 disassociate-route-table --region "$AWS_REGION" --association-id rtbassoc-xxxx
-```
-
-Delete route + route table:
-
-```bash
-aws ec2 delete-route \
+aws ec2 describe-security-groups \
   --region "$AWS_REGION" \
-  --route-table-id "$RTB_ID" \
-  --destination-cidr-block 0.0.0.0/0 || true
-
-aws ec2 delete-route-table --region "$AWS_REGION" --route-table-id "$RTB_ID"
+  --group-ids "$ALB_SG_ID" "$APP_SG_ID"
 ```
 
-Detach and delete IGW:
+### Find running EC2 instances for the project
 
 ```bash
-aws ec2 detach-internet-gateway --region "$AWS_REGION" --internet-gateway-id "$IGW_ID" --vpc-id "$VPC_ID"
-aws ec2 delete-internet-gateway --region "$AWS_REGION" --internet-gateway-id "$IGW_ID"
+aws ec2 describe-instances \
+  --region "$AWS_REGION" \
+  --filters "Name=tag:Project,Values=$PROJECT" "Name=instance-state-name,Values=running" \
+  --query 'Reservations[*].Instances[*].[InstanceId,PrivateIpAddress,PublicIpAddress,Placement.AvailabilityZone]' \
+  --output table
 ```
 
-Delete subnets and VPC:
+### Start SSM session to troubleshoot an instance
 
 ```bash
-aws ec2 delete-subnet --region "$AWS_REGION" --subnet-id "$SUBNET1_ID"
-aws ec2 delete-subnet --region "$AWS_REGION" --subnet-id "$SUBNET2_ID"
-aws ec2 delete-vpc --region "$AWS_REGION" --vpc-id "$VPC_ID"
+aws ssm start-session \
+  --region "$AWS_REGION" \
+  --target <instance-id>
 ```
 
-### Step 16.7 — Remove local files (optional)
+### On the EC2 instance, check web server status
 
 ```bash
-rm -f user-data.sh iam-ec2-trust-policy.json
+sudo systemctl status httpd
+sudo journalctl -u httpd --no-pager | tail -50
+sudo cat /var/log/cloud-init-output.log | tail -100
+curl -I http://localhost
+```
+
+### Test the ALB endpoint
+
+```bash
+curl -I "http://$ALB_DNS"
 ```
 
 ---
 
+## Cleanup
+
+I always include cleanup because AWS resources can continue generating cost if I leave them running.
+
+### Recommended cleanup order
+
+1. Delete or scale down the **Auto Scaling Group**
+2. Delete the **ALB listener**
+3. Delete the **Application Load Balancer**
+4. Delete the **target group**
+5. Delete the **launch template**
+6. Delete the **security groups**
+7. Remove the **instance profile and IAM role**
+8. Delete the **route table**
+9. Detach and delete the **Internet Gateway**
+10. Delete the **subnets**
+11. Delete the **VPC**
+
+### Cleanup note
+
+The deletion order matters because some resources depend on others.
+For example:
+
+* a VPC cannot be deleted while subnets still exist
+* a security group may fail to delete if it is still attached
+* a target group may fail to delete if the ALB still references it
+
+---
